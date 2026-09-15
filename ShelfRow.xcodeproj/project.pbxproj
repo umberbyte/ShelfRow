@@ -27,7 +27,28 @@
 		467E51FB3059992E00EDD734 /* ShelfRow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShelfRow.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		467E520A3059992F00EDD734 /* ShelfRowTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ShelfRowTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		467E52143059992F00EDD734 /* ShelfRowUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ShelfRowUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		467E523A3059A51200EDD734 /* design_document.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = design_document.md; sourceTree = "<group>"; };
+		467E52403059AAB400EDD734 /* update_history.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = update_history.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		467E52933059B4B900EDD734 /* Exceptions for "screenshots" folder in "ShelfRow" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"Cursor_と_スクリーンショット_2026-09-16_0_20_13.png",
+				"Stackroom_と_ShelfRow_—_ContentView_swift.png",
+				"Stackroom_ヘルプ.png",
+				"カスタマイズ_と_Stackroom.png",
+				"スクリーンショット_2026-09-16_0_25_54.png",
+				"スライドショー_と_Stackroom.png",
+				"ヘルパー_と_Stackroom.png",
+				"詳細設定_と_Stackroom.png",
+				"新規スマートシェルフ_と_Stackroom.png",
+				"表紙を編集_と_Stackroom_と_ShelfRow_—_ContentView_swift_と_受信_—_Exchange.png",
+			);
+			target = 467E51FA3059992E00EDD734 /* ShelfRow */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		467E51FD3059992E00EDD734 /* ShelfRow */ = {
@@ -43,6 +64,14 @@
 		467E52173059992F00EDD734 /* ShelfRowUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = ShelfRowUITests;
+			sourceTree = "<group>";
+		};
+		467E527E3059B46800EDD734 /* screenshots */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				467E52933059B4B900EDD734 /* Exceptions for "screenshots" folder in "ShelfRow" target */,
+			);
+			path = screenshots;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -79,6 +108,7 @@
 				467E520D3059992F00EDD734 /* ShelfRowTests */,
 				467E52173059992F00EDD734 /* ShelfRowUITests */,
 				467E51FC3059992E00EDD734 /* Products */,
+				467E523B3059A51200EDD734 /* documents */,
 			);
 			sourceTree = "<group>";
 		};
@@ -90,6 +120,16 @@
 				467E52143059992F00EDD734 /* ShelfRowUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		467E523B3059A51200EDD734 /* documents */ = {
+			isa = PBXGroup;
+			children = (
+				467E527E3059B46800EDD734 /* screenshots */,
+				467E523A3059A51200EDD734 /* design_document.md */,
+				467E52403059AAB400EDD734 /* update_history.md */,
+			);
+			path = documents;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -392,12 +432,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ShelfRow/ShelfRow.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
+				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -422,12 +463,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ShelfRow/ShelfRow.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
+				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
