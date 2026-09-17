@@ -8,6 +8,30 @@
 import SwiftUI
 import SwiftData
 
+enum AppAppearanceMode: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: return "システム"
+        case .light: return "ライト"
+        case .dark: return "ダーク"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 // MARK: - 3-generation startup backup (runs before ModelContainer opens the DB)
 
 /// Copies the SwiftData store files to a rotating 3-generation backup inside
@@ -70,6 +94,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ShelfRowApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
+
+    private var appearanceMode: AppAppearanceMode {
+        AppAppearanceMode(rawValue: appearanceModeRaw) ?? .system
+    }
 
     var sharedModelContainer: ModelContainer = {
         SwiftDataStartupBackup.perform()
@@ -91,6 +120,7 @@ struct ShelfRowApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .preferredColorScheme(appearanceMode.colorScheme)
         }
         .modelContainer(sharedModelContainer)
         .defaultSize(width: 990, height: 620)
@@ -99,6 +129,7 @@ struct ShelfRowApp: App {
         #if os(macOS)
         Settings {
             PreferencesView()
+                .preferredColorScheme(appearanceMode.colorScheme)
         }
         .modelContainer(sharedModelContainer)
         #endif

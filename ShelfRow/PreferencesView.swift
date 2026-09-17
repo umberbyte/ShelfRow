@@ -170,6 +170,84 @@ private struct SettingsRow<Content: View>: View {
     }
 }
 
+private struct PreferencesSectionHeader: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.title2.weight(.semibold))
+            Text(subtitle)
+                .font(PreferencesLayout.captionFont)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct PreferencesPanel<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.7))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(NSColor.separatorColor).opacity(0.55), lineWidth: 1)
+        )
+    }
+}
+
+private struct PreferencesSettingRow<Control: View>: View {
+    let icon: String
+    let title: String
+    let description: String
+    @ViewBuilder let control: Control
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(width: 34, height: 34)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.accentColor.opacity(0.12))
+                )
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(description)
+                    .font(PreferencesLayout.smallCaptionFont)
+                    .foregroundColor(.secondary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 16)
+
+            control
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+    }
+}
+
+private struct PreferencesDivider: View {
+    var body: some View {
+        Divider()
+            .padding(.leading, 48)
+    }
+}
+
 // MARK: - 1. Slideshow Tab
 struct SlideshowSettingsView: View {
     @AppStorage("slideshowHelperPath") private var slideshowHelperName = ""
@@ -179,33 +257,33 @@ struct SlideshowSettingsView: View {
     @AppStorage("zipHelperFullPath") private var zipHelperFullPath = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Text("ビューア")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "ビューア",
+                subtitle: "画像フォルダやアーカイブを開く外部ビューアを設定します。"
+            )
 
-            SettingsRow(label: "スライドショーヘルパー:") {
-                helperField(name: $slideshowHelperName, fullPath: $slideshowHelperFullPath)
-                if slideshowHelperName.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text("画像フォルダを開くための外部ビューアを設定してください。")
-                        .font(PreferencesLayout.captionFont)
-                        .foregroundColor(.red)
-                } else {
-                    Text("使用するビューアは画像フォルダのドラッグ＆ドロップに対応している必要があります。")
-                        .font(PreferencesLayout.captionFont)
-                        .foregroundColor(.secondary)
+            PreferencesPanel {
+                PreferencesSettingRow(
+                    icon: "play.rectangle",
+                    title: "スライドショーヘルパー",
+                    description: slideshowHelperName.trimmingCharacters(in: .whitespaces).isEmpty
+                        ? "画像フォルダを開くための外部ビューアを設定してください。"
+                        : "画像フォルダのドラッグ&ドロップに対応したビューアを指定します。"
+                ) {
+                    helperField(name: $slideshowHelperName, fullPath: $slideshowHelperFullPath)
                 }
-            }
 
-            SettingsRow(label: "Zip アーカイブヘルパー:") {
-                helperField(name: $zipHelperName, fullPath: $zipHelperFullPath)
-                if zipHelperName.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text("Zip アーカイブを開くための外部ビューアを設定してください。")
-                        .font(PreferencesLayout.captionFont)
-                        .foregroundColor(.red)
-                } else {
-                    Text("使用するビューアは Zip アーカイブの閲覧に対応している必要があります。")
-                        .font(PreferencesLayout.captionFont)
-                        .foregroundColor(.secondary)
+                PreferencesDivider()
+
+                PreferencesSettingRow(
+                    icon: "doc.zipper",
+                    title: "Zip アーカイブヘルパー",
+                    description: zipHelperName.trimmingCharacters(in: .whitespaces).isEmpty
+                        ? "Zip アーカイブを開くための外部ビューアを設定してください。"
+                        : "Zip アーカイブの閲覧に対応したビューアを指定します。"
+                ) {
+                    helperField(name: $zipHelperName, fullPath: $zipHelperFullPath)
                 }
             }
 
@@ -272,85 +350,94 @@ struct HelperSettingsView: View {
     @State private var selectedIndex: Int? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("ヘルパー")
-                .font(.title2.weight(.semibold))
-            Text("拡張子ごとに起動するアプリケーションを設定します。拡張子は1行にカンマ区切りで複数登録できます。ここに登録された拡張子はD&D登録でも受け入れます。rar / zip / 7z はページ数で種類を判定し、それ以外はムービーとして登録します。")
-                .font(PreferencesLayout.captionFont)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "ヘルパー",
+                subtitle: "拡張子ごとに起動するアプリケーションを設定します。rar / zip / 7z はページ数で種類を判定し、それ以外はムービーとして登録します。"
+            )
 
-            HStack(alignment: .top, spacing: 18) {
-                // Extensions Column (with its own +/- buttons, like the original)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("拡張子 (コンマ区切り)")
-                        .font(PreferencesLayout.bodyFont)
-                        .fontWeight(.bold)
-                    List(selection: $selectedIndex) {
-                        ForEach(0..<extensions.count, id: \.self) { idx in
-                            TextField("", text: Binding(
-                                get: { extensions[idx] },
-                                set: { extensions[idx] = $0; saveLists() }
-                            ))
-                            .textFieldStyle(.plain)
+            PreferencesPanel {
+                HStack(alignment: .top, spacing: 18) {
+                    // Extensions Column (with its own +/- buttons, like the original)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("拡張子 (コンマ区切り)")
                             .font(PreferencesLayout.bodyFont)
-                            .tag(idx)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 280)
-                    .border(Color.gray.opacity(0.3))
-
-                    HStack(spacing: 4) {
-                        Button(action: addMapping) {
-                            Image(systemName: "plus.circle.fill")
-                        }
-                        Button(action: removeMapping) {
-                            Image(systemName: "minus")
-                        }
-                        .disabled(selectedIndex == nil)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                }
-                .frame(maxWidth: .infinity)
-
-                // Helpers Column (with its own +/- buttons)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("ヘルパーアプリケーション")
-                        .font(PreferencesLayout.bodyFont)
-                        .fontWeight(.bold)
-                    List {
-                        ForEach(0..<helpers.count, id: \.self) { idx in
-                            HStack {
+                            .fontWeight(.bold)
+                        List(selection: $selectedIndex) {
+                            ForEach(0..<extensions.count, id: \.self) { idx in
                                 TextField("", text: Binding(
-                                    get: { helpers[idx] },
-                                    set: { helpers[idx] = $0; saveLists() }
+                                    get: { extensions[idx] },
+                                    set: { extensions[idx] = $0; saveLists() }
                                 ))
                                 .textFieldStyle(.plain)
                                 .font(PreferencesLayout.bodyFont)
-                                Button("選択...") {
-                                    selectHelper(at: idx)
-                                }
-                                .buttonStyle(.borderless)
+                                .accessibilityLabel("拡張子 \(idx + 1)")
+                                .tag(idx)
                             }
                         }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 280)
-                    .border(Color.gray.opacity(0.3))
+                        .frame(maxWidth: .infinity, minHeight: 280)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(NSColor.separatorColor).opacity(0.7)))
 
-                    HStack(spacing: 4) {
-                        Button(action: addMapping) {
-                            Image(systemName: "plus.circle.fill")
+                        HStack(spacing: 4) {
+                            Button(action: addMapping) {
+                                Image(systemName: "plus.circle.fill")
+                            }
+                            .accessibilityLabel("ヘルパー設定を追加")
+                            Button(action: removeMapping) {
+                                Image(systemName: "minus")
+                            }
+                            .accessibilityLabel("選択中のヘルパー設定を削除")
+                            .disabled(selectedIndex == nil)
                         }
-                        Button(action: removeMapping) {
-                            Image(systemName: "minus")
-                        }
-                        .disabled(selectedIndex == nil)
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .frame(maxWidth: .infinity)
+
+                    // Helpers Column (with its own +/- buttons)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("ヘルパーアプリケーション")
+                            .font(PreferencesLayout.bodyFont)
+                            .fontWeight(.bold)
+                        List {
+                            ForEach(0..<helpers.count, id: \.self) { idx in
+                                HStack {
+                                    TextField("", text: Binding(
+                                        get: { helpers[idx] },
+                                        set: { helpers[idx] = $0; saveLists() }
+                                    ))
+                                    .textFieldStyle(.plain)
+                                    .font(PreferencesLayout.bodyFont)
+                                    .accessibilityLabel("ヘルパーアプリケーション \(idx + 1)")
+                                    Button("選択...") {
+                                        selectHelper(at: idx)
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 280)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(NSColor.separatorColor).opacity(0.7)))
+
+                        HStack(spacing: 4) {
+                            Button(action: addMapping) {
+                                Image(systemName: "plus.circle.fill")
+                            }
+                            .accessibilityLabel("ヘルパー設定を追加")
+                            Button(action: removeMapping) {
+                                Image(systemName: "minus")
+                            }
+                            .accessibilityLabel("選択中のヘルパー設定を削除")
+                            .disabled(selectedIndex == nil)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .padding(14)
             }
 
             Spacer()
@@ -412,46 +499,41 @@ struct KeywordEquivalenceSettingsView: View {
     @State private var rules: [KeywordEquivalenceRule] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("キーワード")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "キーワード",
+                subtitle: "作者名・ジャンル・キーワードなどをグループ化し、検索時に同じものとして扱います。"
+            )
 
-            Text("同じものとして扱いたい作者名・ジャンル・キーワードなどをグループ化します。検索欄にグループ内のいずれかを入力すると、同じグループの全キーワードを含む項目も検索結果に含まれます。")
-                .font(PreferencesLayout.captionFont)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            PreferencesPanel {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        Text("種類")
+                            .frame(width: 130, alignment: .leading)
+                        Text("同一視するキーワード")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("")
+                            .frame(width: 34)
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(NSColor.controlBackgroundColor))
 
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    Text("種類")
-                        .frame(width: 130, alignment: .leading)
-                    Text("同一視するキーワード")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("")
-                        .frame(width: 34)
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Color(NSColor.controlBackgroundColor))
+                    Divider()
 
-                Divider()
-
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(rules) { rule in
-                            keywordRuleRow(ruleID: rule.id)
-                            Divider()
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(rules) { rule in
+                                keywordRuleRow(ruleID: rule.id)
+                                Divider()
+                            }
                         }
                     }
+                    .frame(minHeight: 260)
                 }
-                .frame(minHeight: 260)
             }
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color(NSColor.separatorColor).opacity(0.8), lineWidth: 1)
-            )
 
             HStack(spacing: 8) {
                 Button {
@@ -467,6 +549,7 @@ struct KeywordEquivalenceSettingsView: View {
             Text("例: 種類を「作者」、キーワードを「Lorem ipsum, Dolor sit, Amet」にすると、検索欄でどれを検索しても同じグループの作者名を持つ項目がヒットします。")
                 .font(PreferencesLayout.smallCaptionFont)
                 .foregroundColor(.secondary)
+                .lineSpacing(2)
 
             Spacer()
         }
@@ -486,6 +569,7 @@ struct KeywordEquivalenceSettingsView: View {
                     Text(field.label).tag(field)
                 }
             }
+            .accessibilityLabel("キーワードの種類")
             .labelsHidden()
             .frame(width: 130)
 
@@ -510,6 +594,7 @@ struct KeywordEquivalenceSettingsView: View {
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.borderless)
+            .accessibilityLabel("キーワードルールを削除")
             .help("削除")
         }
         .padding(.horizontal, 12)
@@ -594,10 +679,13 @@ struct CustomizeSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("カスタマイズ")
-                .font(.title2.weight(.semibold))
+            PreferencesSectionHeader(
+                title: "カスタマイズ",
+                subtitle: "ファイル名の解析ルールと、種類・項目名の表示を調整します。"
+            )
 
-            VStack(alignment: .center, spacing: 8) {
+            PreferencesPanel {
+                VStack(alignment: .leading, spacing: 8) {
                 Text("フォーマットのカスタマイズ:")
                     .font(PreferencesLayout.sectionTitleFont)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -613,33 +701,38 @@ struct CustomizeSettingsView: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 4)
+                }
+                .padding(14)
             }
 
-            HStack(alignment: .top, spacing: 34) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("種類のカスタマイズ:")
-                        .font(PreferencesLayout.sectionTitleFont)
+            PreferencesPanel {
+                HStack(alignment: .top, spacing: 34) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("種類のカスタマイズ:")
+                            .font(PreferencesLayout.sectionTitleFont)
 
-                    customTypeRow(typeIndex: 0, placeholder: "厚い本", text: $thickBook)
-                    customTypeRow(typeIndex: 1, placeholder: "薄い本", text: $thinBook)
-                    customTypeRow(typeIndex: 2, placeholder: "本の一部", text: $partBook)
-                    customTypeRow(typeIndex: 3, placeholder: "画像セット", text: $imageSet)
-                    customTypeRow(typeIndex: 4, placeholder: "テキスト", text: $textType)
-                    customTypeRow(typeIndex: 5, placeholder: "ムービー", text: $movieType)
+                        customTypeRow(typeIndex: 0, placeholder: "厚い本", text: $thickBook)
+                        customTypeRow(typeIndex: 1, placeholder: "薄い本", text: $thinBook)
+                        customTypeRow(typeIndex: 2, placeholder: "本の一部", text: $partBook)
+                        customTypeRow(typeIndex: 3, placeholder: "画像セット", text: $imageSet)
+                        customTypeRow(typeIndex: 4, placeholder: "テキスト", text: $textType)
+                        customTypeRow(typeIndex: 5, placeholder: "ムービー", text: $movieType)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("項目のカスタマイズ:")
+                            .font(PreferencesLayout.sectionTitleFont)
+
+                        customFieldRow(placeholder: "作者", text: $fieldAuthor)
+                        customFieldRow(placeholder: "ジャンル", text: $fieldGenre)
+                        customFieldRow(placeholder: "関連", text: $fieldRelation)
+                        customFieldRow(placeholder: "キーワードA", text: $fieldKeywordA)
+                        customFieldRow(placeholder: "キーワードB", text: $fieldKeywordB)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("項目のカスタマイズ:")
-                        .font(PreferencesLayout.sectionTitleFont)
-
-                    customFieldRow(placeholder: "作者", text: $fieldAuthor)
-                    customFieldRow(placeholder: "ジャンル", text: $fieldGenre)
-                    customFieldRow(placeholder: "関連", text: $fieldRelation)
-                    customFieldRow(placeholder: "キーワードA", text: $fieldKeywordA)
-                    customFieldRow(placeholder: "キーワードB", text: $fieldKeywordB)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
             }
 
             Spacer()
@@ -682,21 +775,46 @@ struct CustomizeSettingsView: View {
 
 // MARK: - 4. General Pane
 struct GeneralSettingsView: View {
+    @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
     @AppStorage("advancedCloseOnExit") private var closeOnExit = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("一般")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "一般",
+                subtitle: "表示とアプリの基本動作を設定します。"
+            )
 
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("メインウインドウを閉じると終了", isOn: $closeOnExit)
-                    .font(PreferencesLayout.bodyFont)
+            PreferencesPanel {
+                PreferencesSettingRow(
+                    icon: "circle.lefthalf.filled",
+                    title: "外観",
+                    description: "macOSのライト/ダークモードに合わせるか、固定の外観を使います。"
+                ) {
+                    Picker("", selection: $appearanceModeRaw) {
+                        ForEach(AppAppearanceMode.allCases) { mode in
+                            Text(mode.title).tag(mode.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                }
 
-                Text("メインウインドウを閉じた時にShelfRowを終了します。")
-                    .font(PreferencesLayout.captionFont)
-                    .foregroundColor(.secondary)
+                PreferencesDivider()
+
+                PreferencesSettingRow(
+                    icon: "xmark.circle",
+                    title: "終了動作",
+                    description: "メインウインドウを閉じた時にShelfRowを終了します。"
+                ) {
+                    Toggle("閉じると終了", isOn: $closeOnExit)
+                        .font(PreferencesLayout.bodyFont)
+                        .toggleStyle(.switch)
+                }
             }
+
+            Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -708,32 +826,40 @@ struct SecuritySettingsView: View {
     @AppStorage("advancedPasswordValue") private var passwordValue = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("セキュリティ")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "セキュリティ",
+                subtitle: "起動後の簡易ロックとパスワードを設定します。"
+            )
 
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Toggle("簡易ロックをかける", isOn: $lockEnabled)
-                        .font(PreferencesLayout.bodyFont)
+            PreferencesPanel {
+                PreferencesSettingRow(
+                    icon: "lock",
+                    title: "簡易ロック",
+                    description: "ウインドウの表示にパスワードの入力が必要になります。"
+                ) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("簡易ロックをかける", isOn: $lockEnabled)
+                            .font(PreferencesLayout.bodyFont)
 
-                    HStack(spacing: 10) {
-                        Text("パスワード:")
-                            .font(PreferencesLayout.bodyFont)
-                        TextField("", text: $passwordValue)
-                            .textFieldStyle(.roundedBorder)
-                            .font(PreferencesLayout.bodyFont)
-                            .disabled(!lockEnabled)
-                            .frame(width: 220)
+                        HStack(spacing: 10) {
+                            Text("パスワード:")
+                                .font(PreferencesLayout.bodyFont)
+                                .lineLimit(1)
+                                .fixedSize()
+                            TextField("", text: $passwordValue)
+                                .textFieldStyle(.roundedBorder)
+                                .font(PreferencesLayout.bodyFont)
+                                .accessibilityLabel("パスワード")
+                                .disabled(!lockEnabled)
+                                .frame(width: 220)
+                        }
                     }
-
-                    Text("ウインドウの表示にパスワードの入力が必要になります。")
-                        .font(PreferencesLayout.captionFont)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 330, alignment: .leading)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -751,13 +877,15 @@ struct MaintenanceSettingsView: View {
     @State private var backupStatusMessage = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("保守")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "保守",
+                subtitle: "バックアップ、移行、修復などのメンテナンス操作を行います。"
+            )
 
             backupSection
 
-            VStack(alignment: .leading, spacing: 10) {
+            PreferencesPanel {
                 maintenanceRow(
                     title: "ボリューム管理...",
                     description: "外部ドライブやNASの場所が変わった時に、親ボリュームを再割り当てしてアクセス権を保存します。",
@@ -784,18 +912,36 @@ struct MaintenanceSettingsView: View {
                     action: .repairEmptyTitles
                 )
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var backupSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("バックアップ")
-                .font(PreferencesLayout.sectionTitleFont)
+        PreferencesPanel {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: "externaldrive.badge.timemachine")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(Color.accentColor.opacity(0.12))
+                        )
 
-            Toggle("バックアップを有効にする", isOn: $backupEnabled)
-                .font(PreferencesLayout.bodyFont)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("バックアップ")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("データベース、サムネイル、設定ファイルをまとめて保存・復元します。")
+                            .font(PreferencesLayout.smallCaptionFont)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Toggle("有効", isOn: $backupEnabled)
+                        .font(PreferencesLayout.bodyFont)
+                }
 
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
@@ -858,11 +1004,10 @@ struct MaintenanceSettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor).opacity(0.55)))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(NSColor.separatorColor).opacity(0.65)))
         .alert("バックアップからリストアしますか？", isPresented: $showRestoreConfirmation) {
             Button("リストア", role: .destructive) {
                 runRestoreNow()
@@ -874,21 +1019,27 @@ struct MaintenanceSettingsView: View {
     }
 
     private func maintenanceRow(title: String, description: String, action: MaintenanceAction) -> some View {
-        HStack(alignment: .top, spacing: 18) {
+        PreferencesSettingRow(
+            icon: maintenanceIcon(for: action),
+            title: title.replacingOccurrences(of: "...", with: ""),
+            description: description
+        ) {
             Button(title) {
                 NotificationCenter.default.post(name: .maintenanceActionRequested, object: action)
             }
             .controlSize(.large)
-            .frame(width: 240, alignment: .leading)
-
-            Text(description)
-                .font(PreferencesLayout.captionFont)
-                .foregroundStyle(.secondary)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(width: 210, alignment: .leading)
         }
-        .padding(.vertical, 2)
+    }
+
+    private func maintenanceIcon(for action: MaintenanceAction) -> String {
+        switch action {
+        case .manageVolumes: return "externaldrive"
+        case .importXMLLibrary: return "square.and.arrow.down"
+        case .migrateLegacyThumbnails: return "photo.on.rectangle"
+        case .repairThumbnails: return "wand.and.stars"
+        case .repairEmptyTitles: return "textformat"
+        }
     }
 
     private func selectBackupFolder() {

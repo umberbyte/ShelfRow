@@ -47,11 +47,6 @@
 			path = ShelfRowUITests;
 			sourceTree = "<group>";
 		};
-		467E527E3059B46800EDD734 /* screenshots */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = screenshots;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -103,7 +98,6 @@
 		467E523B3059A51200EDD734 /* documents */ = {
 			isa = PBXGroup;
 			children = (
-				467E527E3059B46800EDD734 /* screenshots */,
 				467E523A3059A51200EDD734 /* design_document.md */,
 				467E52403059AAB400EDD734 /* update_history.md */,
 			);

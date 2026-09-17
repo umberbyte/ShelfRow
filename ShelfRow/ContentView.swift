@@ -72,14 +72,22 @@ private enum DroppedFileKind: Equatable {
     }
 }
 
+private struct DroppedFilePageCountUpdate: Sendable {
+    let itemID: UUID
+    let pageCount: Int
+    let shouldApplyAutoBookType: Bool
+}
+
 private struct ShelfDropDelegate: DropDelegate {
     let targetShelfID: UUID
     let targetType: Int
     let draggingShelfID: Binding<UUID?>
     let moveAction: (UUID, UUID, Int) -> Void
     let commitAction: (Int) -> Void
+    let fileDropAction: ([NSItemProvider], UUID) -> Void
 
     func dropEntered(info: DropInfo) {
+        guard !hasFileURLs(info) else { return }
         guard let sourceID = draggingShelfID.wrappedValue,
               sourceID != targetShelfID else {
             return
@@ -88,13 +96,24 @@ private struct ShelfDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
+        DropProposal(operation: hasFileURLs(info) ? .copy : .move)
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        if hasFileURLs(info) {
+            guard targetType == 0 else { return false }
+            fileDropAction(info.itemProviders(for: [.fileURL]), targetShelfID)
+            draggingShelfID.wrappedValue = nil
+            return true
+        }
+
         commitAction(targetType)
         draggingShelfID.wrappedValue = nil
         return true
+    }
+
+    private func hasFileURLs(_ info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.fileURL])
     }
 }
 
@@ -125,6 +144,7 @@ enum ItemSortKey: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.colorScheme) private var colorScheme
 
     // DB Queries
     @Query(sort: \Item.title) private var allItems: [Item]
@@ -160,8 +180,11 @@ struct ContentView: View {
     // UI Selection and view states
     @State private var sidebarSelection: SidebarSelection? = .allBooks
     @State private var selectedItemID: UUID? = nil
+    @State private var selectedItemIDs: Set<UUID> = []
+    @State private var selectionAnchorItemID: UUID? = nil
     @State private var selectedDisplayIndex: Int? = nil
     @State private var lastKeyboardScrollIndex: Int? = nil
+    @State private var scrollPositionItemID: UUID? = nil
     @AppStorage("mainViewIsGrid") private var isGridView = false
 
     // Live Filters (classic toolbar segments)
@@ -207,8 +230,12 @@ struct ContentView: View {
     @State private var draggingShelfID: UUID? = nil
     @State private var staticShelfOrderIDs: [UUID] = []
     @State private var smartShelfOrderIDs: [UUID] = []
+    @State private var editingShelfID: UUID? = nil
+    @State private var editingShelfTitle = ""
+    @State private var pendingSidebarScrollShelfID: UUID? = nil
 
     @FocusState private var mainContentHasFocus: Bool
+    @FocusState private var focusedShelfTitleID: UUID?
 
     private var selectedItem: Item? {
         guard let selectedID = selectedItemID else { return nil }
@@ -245,12 +272,69 @@ struct ContentView: View {
         }
     }
 
+    private var isDarkAppearance: Bool {
+        colorScheme == .dark
+    }
+
     private var modernSurfaceColor: Color {
-        Color(red: 0.055, green: 0.065, blue: 0.075)
+        isDarkAppearance
+            ? Color(red: 0.055, green: 0.065, blue: 0.075)
+            : Color(NSColor.windowBackgroundColor)
     }
 
     private var modernPanelColor: Color {
-        Color(red: 0.105, green: 0.120, blue: 0.140)
+        isDarkAppearance
+            ? Color(red: 0.105, green: 0.120, blue: 0.140)
+            : Color(NSColor.controlBackgroundColor)
+    }
+
+    private var primaryTextColor: Color {
+        Color(NSColor.labelColor)
+    }
+
+    private var secondaryTextColor: Color {
+        Color(NSColor.secondaryLabelColor)
+    }
+
+    private var tertiaryTextColor: Color {
+        Color(NSColor.tertiaryLabelColor)
+    }
+
+    private var inspectorTextColor: Color {
+        isDarkAppearance ? primaryTextColor : .black
+    }
+
+    private var controlFillColor: Color {
+        isDarkAppearance ? Color.white.opacity(0.075) : Color.black.opacity(0.055)
+    }
+
+    private var subtleFillColor: Color {
+        isDarkAppearance ? Color.white.opacity(0.035) : Color.black.opacity(0.035)
+    }
+
+    private var alternateRowFillColor: Color {
+        isDarkAppearance ? Color.white.opacity(0.035) : Color.black.opacity(0.035)
+    }
+
+    private var rowFillColor: Color {
+        isDarkAppearance ? Color.white.opacity(0.015) : Color.black.opacity(0.012)
+    }
+
+    private var separatorTintColor: Color {
+        isDarkAppearance ? Color.white.opacity(0.10) : Color.black.opacity(0.12)
+    }
+
+    private var sidebarGradientColors: [Color] {
+        if isDarkAppearance {
+            return [
+                Color(red: 0.155, green: 0.165, blue: 0.190),
+                Color(red: 0.105, green: 0.115, blue: 0.140)
+            ]
+        }
+        return [
+            Color(NSColor.controlBackgroundColor),
+            Color(NSColor.windowBackgroundColor)
+        ]
     }
 
     var body: some View {
@@ -339,7 +423,7 @@ struct ContentView: View {
         }
         // Supporting Drag & Drop to Import Files seamlessly in initial or running states
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            handleFileDrop(providers: providers)
+            handleFileDrop(providers: providers, targetShelfID: currentStaticShelfID())
             return true
         }
         .onReceive(NotificationCenter.default.publisher(for: .maintenanceActionRequested)) { notification in
@@ -397,10 +481,10 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(currentCollectionTitle)
                         .font(.system(size: 21, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(primaryTextColor)
                     Text("\(displayItems.count.formatted()) 項目")
                         .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(secondaryTextColor)
                 }
 
                 Spacer(minLength: 16)
@@ -417,11 +501,12 @@ struct ContentView: View {
                             .font(.system(size: 13, weight: .semibold))
                         Image(systemName: "chevron.down")
                             .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(isGridView ? secondaryTextColor : tertiaryTextColor)
                     }
-                    .foregroundStyle(.white)
+                    .foregroundStyle(isGridView ? primaryTextColor : tertiaryTextColor)
                 }
                 .menuStyle(.borderlessButton)
+                .disabled(!isGridView)
                 .frame(width: 116, height: 36, alignment: .center)
                 .background(headerControlBackground)
                 .contentShape(Rectangle())
@@ -429,11 +514,11 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 15))
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(secondaryTextColor)
                     TextField("検索", text: $searchText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 14))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(primaryTextColor)
                 }
                 .padding(.horizontal, 12)
                 .frame(width: 300, height: 36)
@@ -447,7 +532,10 @@ struct ContentView: View {
         .padding(.bottom, 16)
         .background(
             LinearGradient(
-                colors: [Color.white.opacity(0.045), Color.white.opacity(0.015)],
+                colors: [
+                    isDarkAppearance ? Color.white.opacity(0.045) : Color.black.opacity(0.025),
+                    isDarkAppearance ? Color.white.opacity(0.015) : Color.black.opacity(0.006)
+                ],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -456,10 +544,10 @@ struct ContentView: View {
 
     private var headerControlBackground: some View {
         RoundedRectangle(cornerRadius: 8)
-            .fill(Color.white.opacity(0.075))
+            .fill(controlFillColor)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(separatorTintColor, lineWidth: 1)
             )
     }
 
@@ -476,10 +564,10 @@ struct ContentView: View {
         .frame(height: 42)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.075))
+                .fill(controlFillColor)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        .stroke(separatorTintColor, lineWidth: 1)
                 )
         )
     }
@@ -492,7 +580,7 @@ struct ContentView: View {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(isSelected ? .white : primaryTextColor)
             .frame(width: 86, height: 34)
             .background(
                 RoundedRectangle(cornerRadius: 9)
@@ -515,6 +603,7 @@ struct ContentView: View {
                             .fill(Color.green)
                             .frame(width: 14, height: 14)
                             .shadow(color: .green.opacity(0.55), radius: 5)
+                            .accessibilityHidden(true)
                         Text("未読")
                             .font(.system(size: 14, weight: .semibold))
                     }
@@ -524,7 +613,7 @@ struct ContentView: View {
 
                 Text("種別")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .foregroundStyle(secondaryTextColor)
 
                 filterTypeButton(index: nil, title: "すべて", isSelected: typeFilterSelection.isEmpty) {
                     typeFilterSelection.removeAll()
@@ -546,7 +635,7 @@ struct ContentView: View {
 
                 Text("評価")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .foregroundStyle(secondaryTextColor)
 
                 ForEach(1...5, id: \.self) { rate in
                     filterSegment(isSelected: ratingFilterSelection.contains(rate), minWidth: 72) {
@@ -570,7 +659,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(primaryTextColor)
                 .padding(.horizontal, 18)
                 .frame(height: 36)
                 .background(headerControlBackground)
@@ -580,7 +669,7 @@ struct ContentView: View {
 
     private var verticalFilterSeparator: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.22))
+            .fill(separatorTintColor)
             .frame(width: 1, height: 20)
     }
 
@@ -606,13 +695,13 @@ struct ContentView: View {
 
     /// A compact star-with-number label used by the rating filter (★1 … ★5).
     private func starRow(count: Int, filled: Bool) -> some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             Image(systemName: "star.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(filled ? .white : .white.opacity(0.9))
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(filled ? .white : Color.yellow)
             Text("\(count)")
-                .font(.system(size: 12, weight: filled ? .bold : .regular))
-                .foregroundStyle(filled ? .white : .white.opacity(0.88))
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(filled ? .white : primaryTextColor)
         }
     }
 
@@ -625,13 +714,13 @@ struct ContentView: View {
                 .frame(minWidth: minWidth, minHeight: 36)
                 .background(
                     Capsule()
-                        .fill(isSelected ? Color.accentColor : Color.white.opacity(0.075))
+                        .fill(isSelected ? Color.accentColor : controlFillColor)
                 )
                 .overlay(
                     Capsule()
-                        .stroke(isSelected ? Color.white.opacity(0.22) : Color.white.opacity(0.14), lineWidth: 1)
+                        .stroke(isSelected ? Color.white.opacity(0.22) : separatorTintColor, lineWidth: 1)
                 )
-                .foregroundStyle(.white)
+                .foregroundStyle(isSelected ? .white : primaryTextColor)
         }
         .buttonStyle(.plain)
     }
@@ -702,94 +791,118 @@ struct ContentView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 12) {
-                    Image(systemName: "book")
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(.blue)
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 28, height: 28)
+                        .accessibilityHidden(true)
                     Text("ShelfRow")
                         .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(primaryTextColor)
                 }
                 .padding(.top, 18)
                 .padding(.horizontal, 20)
             }
 
-            List {
-                Section {
-                    sidebarSelectionButton(.allBooks) {
-                        sidebarLibraryLabel("すべての項目", systemImage: "doc.text", count: allItems.count)
+            ScrollViewReader { sidebarProxy in
+                List {
+                    Section {
+                        sidebarSelectionButton(.allBooks) {
+                            sidebarLibraryLabel("すべての項目", systemImage: "doc.text", count: allItems.count)
+                        }
+                        sidebarSelectionButton(.unreadBooks) {
+                            sidebarLibraryLabel("未読", systemImage: "circle.fill", count: allItems.filter(\.isUnread).count)
+                        }
+                    } header: {
+                        sidebarSectionHeader("ライブラリ")
                     }
-                    sidebarSelectionButton(.unreadBooks) {
-                        sidebarLibraryLabel("未読", systemImage: "circle.fill", count: allItems.filter(\.isUnread).count)
-                    }
-                } header: {
-                    sidebarSectionHeader("ライブラリ")
-                }
 
-                Section {
-                    let staticShelves = orderedShelves(type: 0)
-                    ForEach(staticShelves) { shelf in
-                        sidebarSelectionButton(.shelf(shelf.id)) {
-                            shelfLabel(shelf)
-                        }
-                        .onDrag {
-                            draggingShelfID = shelf.id
-                            return NSItemProvider(object: shelf.id.uuidString as NSString)
-                        }
-                        .onDrop(
-                            of: [.text],
-                            delegate: ShelfDropDelegate(
-                                targetShelfID: shelf.id,
-                                targetType: shelf.type,
-                                draggingShelfID: $draggingShelfID,
-                                moveAction: reorderShelfByDrag,
-                                commitAction: commitShelfDrag
+                    Section {
+                        let staticShelves = orderedShelves(type: 0)
+                        ForEach(staticShelves) { shelf in
+                            sidebarSelectionButton(.shelf(shelf.id)) {
+                                shelfLabel(shelf)
+                            }
+                            .id(shelf.id)
+                            .onDrag {
+                                draggingShelfID = shelf.id
+                                return NSItemProvider(object: shelf.id.uuidString as NSString)
+                            }
+                            .onDrop(
+                                of: [.text, .fileURL],
+                                delegate: ShelfDropDelegate(
+                                    targetShelfID: shelf.id,
+                                    targetType: shelf.type,
+                                    draggingShelfID: $draggingShelfID,
+                                    moveAction: reorderShelfByDrag,
+                                    commitAction: commitShelfDrag,
+                                    fileDropAction: handleFileDrop(providers:targetShelfID:)
+                                )
                             )
-                        )
-                        .contextMenu {
-                            Button("削除") {
-                                deleteShelf(shelf)
+                            .contextMenu {
+                                Button("削除") {
+                                    deleteShelf(shelf)
+                                }
                             }
                         }
+                    } header: {
+                        sidebarSectionHeader("お気に入り")
                     }
-                } header: {
-                    sidebarSectionHeader("お気に入り")
-                }
 
-                Section {
-                    let smartShelves = orderedShelves(type: 1)
-                    ForEach(smartShelves) { shelf in
-                        sidebarSelectionButton(.shelf(shelf.id)) {
-                            shelfLabel(shelf)
-                        }
-                        .onDrag {
-                            draggingShelfID = shelf.id
-                            return NSItemProvider(object: shelf.id.uuidString as NSString)
-                        }
-                        .onDrop(
-                            of: [.text],
-                            delegate: ShelfDropDelegate(
-                                targetShelfID: shelf.id,
-                                targetType: shelf.type,
-                                draggingShelfID: $draggingShelfID,
-                                moveAction: reorderShelfByDrag,
-                                commitAction: commitShelfDrag
+                    Section {
+                        let smartShelves = orderedShelves(type: 1)
+                        ForEach(smartShelves) { shelf in
+                            sidebarSelectionButton(.shelf(shelf.id)) {
+                                shelfLabel(shelf)
+                            }
+                            .id(shelf.id)
+                            .onDrag {
+                                draggingShelfID = shelf.id
+                                return NSItemProvider(object: shelf.id.uuidString as NSString)
+                            }
+                            .onDrop(
+                                of: [.text, .fileURL],
+                                delegate: ShelfDropDelegate(
+                                    targetShelfID: shelf.id,
+                                    targetType: shelf.type,
+                                    draggingShelfID: $draggingShelfID,
+                                    moveAction: reorderShelfByDrag,
+                                    commitAction: commitShelfDrag,
+                                    fileDropAction: handleFileDrop(providers:targetShelfID:)
+                                )
                             )
-                        )
-                        .contextMenu {
-                            Button("編集...") {
-                                smartShelfEditorPresentation = SmartShelfEditorPresentation(shelf: shelf)
-                            }
-                            Button("削除") {
-                                deleteShelf(shelf)
+                            .contextMenu {
+                                Button("編集...") {
+                                    smartShelfEditorPresentation = SmartShelfEditorPresentation(shelf: shelf)
+                                }
+                                Button("削除") {
+                                    deleteShelf(shelf)
+                                }
                             }
                         }
+                    } header: {
+                        sidebarSectionHeader("スマートシェルフ")
                     }
-                } header: {
-                    sidebarSectionHeader("スマートシェルフ")
+                }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .onChange(of: pendingSidebarScrollShelfID) { _, shelfID in
+                    guard let shelfID else { return }
+                    Task { @MainActor in
+                        for attempt in 0..<3 {
+                            await Task.yield()
+                            if attempt > 0 {
+                                try? await Task.sleep(for: .milliseconds(80))
+                            }
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                sidebarProxy.scrollTo(shelfID, anchor: .center)
+                            }
+                        }
+                        focusedShelfTitleID = shelfID
+                        pendingSidebarScrollShelfID = nil
+                    }
                 }
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
 
             Divider()
 
@@ -806,10 +919,11 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(primaryTextColor)
                         .frame(width: 38, height: 32)
                         .contentShape(Rectangle())
                 }
+                .accessibilityLabel("シェルフを追加")
                 .buttonStyle(.plain)
                 .fixedSize()
                 .background(modernIconButtonBackground)
@@ -817,10 +931,11 @@ struct ContentView: View {
                 SettingsLink {
                     Image(systemName: "gearshape")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(primaryTextColor)
                         .frame(width: 38, height: 32)
                         .contentShape(Rectangle())
                 }
+                .accessibilityLabel("環境設定")
                 .buttonStyle(.plain)
                 .background(modernIconButtonBackground)
                 .help("環境設定")
@@ -829,14 +944,11 @@ struct ContentView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 7)
-            .background(Color.white.opacity(0.035))
+            .background(subtleFillColor)
         }
         .background(
             LinearGradient(
-                colors: [
-                    Color(red: 0.155, green: 0.165, blue: 0.190),
-                    Color(red: 0.105, green: 0.115, blue: 0.140)
-                ],
+                colors: sidebarGradientColors,
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -845,10 +957,10 @@ struct ContentView: View {
 
     private var modernIconButtonBackground: some View {
         RoundedRectangle(cornerRadius: 8)
-            .fill(Color.white.opacity(0.08))
+            .fill(controlFillColor)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.13), lineWidth: 1)
+                    .stroke(separatorTintColor, lineWidth: 1)
             )
     }
 
@@ -874,18 +986,18 @@ struct ContentView: View {
     private func sidebarSectionHeader(_ title: String) -> some View {
         Text(title)
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.58))
+            .foregroundStyle(isDarkAppearance ? Color.white.opacity(0.74) : .black)
     }
 
     private func sidebarLibraryLabel(_ title: String, systemImage: String, count: Int) -> some View {
         HStack(spacing: 10) {
             Image(systemName: systemImage)
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(systemImage == "circle.fill" ? .green : .white.opacity(0.9))
+                .foregroundStyle(systemImage == "circle.fill" ? .green : secondaryTextColor)
                 .frame(width: 22)
             Text(title)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(primaryTextColor)
             Spacer()
             countBadge(count)
         }
@@ -899,7 +1011,7 @@ struct ContentView: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 9)
             .padding(.vertical, 3)
-            .background(Capsule().fill(Color.white.opacity(0.14)))
+            .background(Capsule().fill(isDarkAppearance ? Color.white.opacity(0.14) : Color.black.opacity(0.28)))
     }
 
     private func shelfItemCount(_ shelf: Shelf) -> Int {
@@ -917,10 +1029,25 @@ struct ContentView: View {
                 .foregroundStyle(shelf.type == 1 ? .purple : BookTypeInfo.folderColor(forIcon: shelf.icon))
                 .font(.system(size: 16, weight: .medium))
                 .frame(width: 22)
-            Text(shelf.title)
-                .font(.system(size: 14, weight: .semibold))
-                .lineLimit(1)
-                .foregroundStyle(.white)
+            if editingShelfID == shelf.id {
+                TextField("シェルフ名", text: $editingShelfTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(primaryTextColor)
+                    .accessibilityLabel("シェルフ名")
+                    .focused($focusedShelfTitleID, equals: shelf.id)
+                    .onSubmit {
+                        commitEditingShelfTitle(shelf)
+                    }
+                    .onAppear {
+                        focusedShelfTitleID = shelf.id
+                    }
+            } else {
+                Text(shelf.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(primaryTextColor)
+            }
             Spacer()
             countBadge(shelfItemCount(shelf))
         }
@@ -1009,20 +1136,20 @@ struct ContentView: View {
             modernMainHeader
 
             Divider()
-                .overlay(Color.white.opacity(0.08))
+                .overlay(separatorTintColor)
 
             if itemsToDisplay.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "folder")
                         .font(.system(size: 40))
-                        .foregroundStyle(.white.opacity(0.45))
+                        .foregroundStyle(tertiaryTextColor)
                     Text(allItems.isEmpty ? "ライブラリは空です。" : "該当する本がありません。")
                         .font(.headline)
-                        .foregroundStyle(.white.opacity(0.68))
+                        .foregroundStyle(secondaryTextColor)
                     if allItems.isEmpty {
                         Text("ZIPや画像フォルダをここにドラッグ＆ドロップして追加できます。")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.58))
+                            .foregroundStyle(tertiaryTextColor)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1030,30 +1157,51 @@ struct ContentView: View {
             } else {
                 if isGridView {
                     // Grid view: sort control bar on top
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 150), spacing: 16)], spacing: 16) {
-                            ForEach(itemsToDisplay) { item in
-                                // Double-tap must be attached BEFORE single-tap,
-                                // otherwise the single-tap gesture swallows it.
-                                GridItemCardView(item: item, isSelected: selectedItemID == item.id)
-                                    .contentShape(Rectangle()) // full-card hit area
-                                    .overlay(clickOverlay(for: item))
-                                    .contextMenu {
-                                        itemContextMenu(item)
-                                    }
+                    GeometryReader { geometry in
+                        ScrollView {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 150), spacing: 16)], spacing: 16) {
+                                ForEach(itemsToDisplay) { item in
+                                    // Double-tap must be attached BEFORE single-tap,
+                                    // otherwise the single-tap gesture swallows it.
+                                    GridItemCardView(item: item, isSelected: isItemSelected(item))
+                                        .contentShape(Rectangle()) // full-card hit area
+                                        .id(item.id)
+                                        .overlay(clickOverlay(for: item))
+                                        .contextMenu {
+                                            itemContextMenu(item)
+                                        }
+                                }
                             }
+                            .padding()
+                            .scrollTargetLayout()
                         }
-                        .padding()
-                    }
-                    .background(modernSurfaceColor)
-                    .focusable()
-                    .focused($mainContentHasFocus)
-                    .onKeyPress(.return) {
-                        if let item = selectedItem {
-                            openItem(item)
+                        .scrollPosition(id: $scrollPositionItemID)
+                        .background(modernSurfaceColor)
+                        .focusable()
+                        .focused($mainContentHasFocus)
+                        .onKeyPress(.upArrow) {
+                            moveSelection(by: -gridKeyboardStep(for: geometry.size.width), extending: currentEventIsShiftModified())
                             return .handled
                         }
-                        return .ignored
+                        .onKeyPress(.downArrow) {
+                            moveSelection(by: gridKeyboardStep(for: geometry.size.width), extending: currentEventIsShiftModified())
+                            return .handled
+                        }
+                        .onKeyPress(.return) {
+                            if let item = selectedItem {
+                                openItem(item)
+                                return .handled
+                            }
+                            return .ignored
+                        }
+                        .onKeyPress(.delete) {
+                            deleteSelectedItemsFromKeyboard()
+                            return .handled
+                        }
+                        .onKeyPress(.deleteForward) {
+                            deleteSelectedItemsFromKeyboard()
+                            return .handled
+                        }
                     }
                 } else {
                     // List view: clickable column header + aligned rows
@@ -1064,52 +1212,60 @@ struct ContentView: View {
                     // SwiftUI List on macOS still fights custom single/double
                     // click gestures and made repeated key navigation sluggish
                     // with large libraries.
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ForEach(itemsToDisplay.enumerated(), id: \.element.id) { index, item in
-                                    classicListRow(item: item, isSelected: selectedItemID == item.id)
-                                        .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 5)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 7)
-                                                .fill(
-                                                    selectedItemID == item.id
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(itemsToDisplay.enumerated(), id: \.element.id) { index, item in
+                                classicListRow(item: item, isSelected: isItemSelected(item))
+                                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 7)
+                                            .fill(
+                                                    isItemSelected(item)
                                                         ? Color.accentColor.opacity(0.92)
-                                                        : (index.isMultiple(of: 2) ? Color.white.opacity(0.035) : Color.white.opacity(0.015))
-                                                )
-                                        )
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 1)
-                                        .contentShape(Rectangle()) // full-row hit area
-                                        .id(item.id)
-                                        .overlay(clickOverlay(for: item))
-                                        .contextMenu {
-                                            itemContextMenu(item)
-                                        }
-                                }
+                                                        : (index.isMultiple(of: 2) ? alternateRowFillColor : rowFillColor)
+                                            )
+                                    )
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .contentShape(Rectangle()) // full-row hit area
+                                    .id(item.id)
+                                    .overlay(clickOverlay(for: item))
+                                    .contextMenu {
+                                        itemContextMenu(item)
+                                    }
                             }
                         }
-                        .background(modernSurfaceColor)
-                        .focusable()
-                        .focused($mainContentHasFocus)
-                        .focusEffectDisabled()
-                        .onKeyPress(.downArrow) {
-                            moveSelection(by: 1, proxy: proxy)
+                        .scrollTargetLayout()
+                    }
+                    .scrollPosition(id: $scrollPositionItemID)
+                    .background(modernSurfaceColor)
+                    .focusable()
+                    .focused($mainContentHasFocus)
+                    .focusEffectDisabled()
+                    .onKeyPress(.downArrow) {
+                        moveSelection(by: 1, extending: currentEventIsShiftModified())
+                        return .handled
+                    }
+                    .onKeyPress(.upArrow) {
+                        moveSelection(by: -1, extending: currentEventIsShiftModified())
+                        return .handled
+                    }
+                    .onKeyPress(.return) {
+                        if let item = selectedItem {
+                            openItem(item)
                             return .handled
                         }
-                        .onKeyPress(.upArrow) {
-                            moveSelection(by: -1, proxy: proxy)
-                            return .handled
-                        }
-                        .onKeyPress(.return) {
-                            if let item = selectedItem {
-                                openItem(item)
-                                return .handled
-                            }
-                            return .ignored
-                        }
+                        return .ignored
+                    }
+                    .onKeyPress(.delete) {
+                        deleteSelectedItemsFromKeyboard()
+                        return .handled
+                    }
+                    .onKeyPress(.deleteForward) {
+                        deleteSelectedItemsFromKeyboard()
+                        return .handled
                     }
                 }
             }
@@ -1185,7 +1341,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(sortKey == col.key ? .white : .white.opacity(0.62))
+                .foregroundStyle(isDarkAppearance ? (sortKey == col.key ? primaryTextColor : secondaryTextColor) : .black)
                 .contextMenu {
                     headerContextMenu
                 }
@@ -1193,10 +1349,10 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color.white.opacity(0.03))
+        .background(subtleFillColor)
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color.white.opacity(0.08))
+                .fill(separatorTintColor)
                 .frame(height: 1)
         }
         .contextMenu {
@@ -1239,8 +1395,8 @@ struct ContentView: View {
     @ViewBuilder
     private func listCell(_ col: ListColumn, _ item: Item, isSelected: Bool) -> some View {
         // Primary/secondary text turns white on the selection highlight.
-        let primaryColor: Color = .white
-        let secondaryColor: Color = isSelected ? .white.opacity(0.88) : .white.opacity(0.72)
+        let primaryColor: Color = isSelected ? .white : (isDarkAppearance ? primaryTextColor : .black)
+        let secondaryColor: Color = isSelected ? .white.opacity(0.88) : (isDarkAppearance ? secondaryTextColor : .black)
         switch col.key {
         case .unread:
             // Green circle like classic "O"
@@ -1310,10 +1466,10 @@ struct ContentView: View {
                 VStack {
                     Image(systemName: "sidebar.right")
                         .font(.system(size: 28))
-                        .foregroundStyle(.white.opacity(0.42))
+                        .foregroundStyle(inspectorTextColor)
                     Text("本棚から本を選択してください。")
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.58))
+                        .foregroundStyle(inspectorTextColor)
                         .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1333,16 +1489,16 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .stroke(separatorTintColor, lineWidth: 1)
                         )
-                        .shadow(color: .black.opacity(0.35), radius: 12, x: 0, y: 6)
+                        .shadow(color: .black.opacity(isDarkAppearance ? 0.35 : 0.16), radius: 12, x: 0, y: 6)
                     Spacer()
                 }
                 .padding(.top, 20)
 
                 Text(item.title)
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(inspectorTextColor)
                     .lineLimit(2)
                     .padding(.horizontal, 20)
 
@@ -1352,10 +1508,10 @@ struct ContentView: View {
                 ))
                 .toggleStyle(.checkbox)
                 .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.88))
+                .foregroundStyle(inspectorTextColor)
                 .padding(.horizontal, 20)
 
-                Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
+                Divider().overlay(separatorTintColor).padding(.horizontal, 20)
 
                 // Form with customized labels from Customize Settings Tab!
                 VStack(spacing: 8) {
@@ -1372,7 +1528,7 @@ struct ContentView: View {
                     HStack {
                         Text("レート:")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.66))
+                            .foregroundStyle(inspectorTextColor)
                             .frame(width: 78, alignment: .trailing)
                         RatingView(rating: Binding(
                             get: { item.rating },
@@ -1408,7 +1564,7 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 14)
 
-                Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
+                Divider().overlay(separatorTintColor).padding(.horizontal, 20)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("登録日: \(item.addedDate.formatted(date: .numeric, time: .omitted))")
@@ -1420,7 +1576,7 @@ struct ContentView: View {
                     }
                 }
                 .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.58))
+                .foregroundStyle(inspectorTextColor)
                 .padding(.horizontal, 20)
             }
             .padding(.bottom, 20)
@@ -1433,22 +1589,23 @@ struct ContentView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.66))
+                    .foregroundStyle(inspectorTextColor)
                     .frame(width: 78, alignment: .trailing)
 
                 TextField("", text: text)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(inspectorTextColor)
+                    .accessibilityLabel(label.replacingOccurrences(of: ":", with: ""))
                     .padding(.horizontal, 10)
                     .frame(height: 30)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.white.opacity(0.07))
+                            .fill(controlFillColor)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                            .stroke(separatorTintColor, lineWidth: 1)
                     )
             }
 
@@ -1510,6 +1667,8 @@ struct ContentView: View {
         searchText = keyword
         displayItems = computeFilteredItems()
         selectedItemID = nil
+        selectedItemIDs.removeAll()
+        selectionAnchorItemID = nil
         selectedDisplayIndex = nil
     }
 
@@ -1731,56 +1890,97 @@ struct ContentView: View {
         return sortAscending ? sorted : sorted.reversed()
     }
 
-    /// Moves the selection up/down within the displayed items (keyboard nav)
-    /// and scrolls the newly selected row into view.
-    private func moveSelection(by delta: Int, proxy: ScrollViewProxy?) {
+    private func gridKeyboardStep(for width: CGFloat) -> Int {
+        max(1, Int((width - 32) / 126))
+    }
+
+    private func currentEventIsShiftModified() -> Bool {
+        NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+    }
+
+    private func isItemSelected(_ item: Item) -> Bool {
+        selectedItemIDs.contains(item.id)
+    }
+
+    /// Moves the selection within the displayed items (keyboard nav) and keeps
+    /// the newly selected row/card visible.
+    private func moveSelection(by delta: Int, extending: Bool = false) {
         guard !displayItems.isEmpty else { return }
         let currentIndex = selectedDisplayIndex ?? displayItems.firstIndex { $0.id == selectedItemID } ?? -1
         let newIndex = min(max(currentIndex + delta, 0), displayItems.count - 1)
         let id = displayItems[newIndex].id
         selectedItemID = id
         selectedDisplayIndex = newIndex
-
-        let shouldScroll: Bool
-        if newIndex == 0 || newIndex == displayItems.count - 1 {
-            shouldScroll = true
-        } else if let lastKeyboardScrollIndex {
-            shouldScroll = abs(newIndex - lastKeyboardScrollIndex) >= 8
+        if extending {
+            let anchorID = selectionAnchorItemID ?? displayItems[max(currentIndex, 0)].id
+            selectionAnchorItemID = anchorID
+            selectedItemIDs = selectionSet(from: anchorID, to: id)
         } else {
-            shouldScroll = true
+            selectionAnchorItemID = id
+            selectedItemIDs = [id]
         }
 
-        if shouldScroll {
-            lastKeyboardScrollIndex = newIndex
-            proxy?.scrollTo(id)
-        }
+        lastKeyboardScrollIndex = newIndex
+        scrollPositionItemID = id
     }
 
     private func refreshSelectedDisplayIndex() {
         guard let selectedItemID else {
             selectedDisplayIndex = nil
             lastKeyboardScrollIndex = nil
+            selectedItemIDs.removeAll()
+            selectionAnchorItemID = nil
             return
         }
         selectedDisplayIndex = displayItems.firstIndex { $0.id == selectedItemID }
+        guard selectedDisplayIndex != nil else {
+            self.selectedItemID = nil
+            selectedItemIDs.removeAll()
+            selectionAnchorItemID = nil
+            lastKeyboardScrollIndex = nil
+            return
+        }
         lastKeyboardScrollIndex = selectedDisplayIndex
+        selectedItemIDs = selectedItemIDs.filter { id in
+            displayItems.contains { $0.id == id }
+        }
+        if selectedItemIDs.isEmpty {
+            selectedItemIDs = [selectedItemID]
+        }
     }
 
     private func clickOverlay(for item: Item) -> some View {
-        PrimaryClickOverlay {
-            selectItemFromPointer(item)
+        PrimaryClickOverlay { modifiers in
+            selectItemFromPointer(item, modifiers: modifiers)
         } onDoubleClick: {
             openItem(item)
         }
     }
 
-    private func selectItemFromPointer(_ item: Item) {
-        if selectedItemID != item.id {
+    private func selectItemFromPointer(_ item: Item, modifiers: NSEvent.ModifierFlags) {
+        let isCommandClick = modifiers.contains(.command)
+        if isCommandClick {
+            if selectedItemIDs.contains(item.id) {
+                selectedItemIDs.remove(item.id)
+                if selectedItemID == item.id {
+                    selectedItemID = selectedItemIDs.compactMap { id in displayItems.first { $0.id == id } }.last?.id
+                }
+            } else {
+                selectedItemIDs.insert(item.id)
+                selectedItemID = item.id
+                selectionAnchorItemID = selectionAnchorItemID ?? item.id
+            }
+        } else {
+            selectedItemIDs = [item.id]
             selectedItemID = item.id
-            selectedDisplayIndex = displayItems.firstIndex { $0.id == item.id }
-            lastKeyboardScrollIndex = selectedDisplayIndex
-        } else if selectedDisplayIndex == nil {
-            selectedDisplayIndex = displayItems.firstIndex { $0.id == item.id }
+            selectionAnchorItemID = item.id
+        }
+
+        if selectedItemID == nil {
+            selectedDisplayIndex = nil
+            lastKeyboardScrollIndex = nil
+        } else {
+            selectedDisplayIndex = displayItems.firstIndex { $0.id == selectedItemID }
             lastKeyboardScrollIndex = selectedDisplayIndex
         }
         if !mainContentHasFocus {
@@ -1788,8 +1988,17 @@ struct ContentView: View {
         }
     }
 
+    private func selectionSet(from anchorID: UUID, to targetID: UUID) -> Set<UUID> {
+        guard let anchorIndex = displayItems.firstIndex(where: { $0.id == anchorID }),
+              let targetIndex = displayItems.firstIndex(where: { $0.id == targetID }) else {
+            return [targetID]
+        }
+        let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
+        return Set(displayItems[bounds].map(\.id))
+    }
+
 private struct PrimaryClickOverlay: NSViewRepresentable {
-        let onPrimaryClick: () -> Void
+        let onPrimaryClick: (NSEvent.ModifierFlags) -> Void
         let onDoubleClick: () -> Void
 
         func makeNSView(context: Context) -> ClickView {
@@ -1805,7 +2014,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
 
         final class ClickView: NSView {
-            var onPrimaryClick: (() -> Void)?
+            var onPrimaryClick: ((NSEvent.ModifierFlags) -> Void)?
             var onDoubleClick: (() -> Void)?
 
             override var acceptsFirstResponder: Bool { true }
@@ -1827,7 +2036,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             }
 
             override func mouseDown(with event: NSEvent) {
-                onPrimaryClick?()
+                onPrimaryClick?(event.modifierFlags)
                 if event.clickCount >= 2 {
                     onDoubleClick?()
                 }
@@ -1897,7 +2106,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     }
 
     // MARK: - Drag and Drop Handlers (batch queue)
-    private func handleFileDrop(providers: [NSItemProvider]) {
+    private func handleFileDrop(providers: [NSItemProvider], targetShelfID: UUID? = nil) {
         Task { @MainActor in
             // 1. Collect all dropped URLs first
             var urls: [URL] = []
@@ -1923,7 +2132,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 let fileExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
                 guard fileExists, let kind = droppedFileKind(for: url, isDirectory: isDir.boolValue) else { continue }
 
-                if let id = addDroppedFile(url: url, kind: kind) {
+                if let id = addDroppedFile(url: url, kind: kind, targetShelfID: targetShelfID) {
                     lastAddedID = id
                 }
                 // Yield so the UI (progress counter) stays responsive
@@ -1933,10 +2142,20 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             try? modelContext.save()
             if let lastAddedID {
                 selectedItemID = lastAddedID
+                selectedItemIDs = [lastAddedID]
+                selectionAnchorItemID = lastAddedID
             }
             displayItems = computeFilteredItems()
             refreshSelectedDisplayIndex()
         }
+    }
+
+    private func currentStaticShelfID() -> UUID? {
+        guard case .shelf(let shelfID) = sidebarSelection,
+              shelves.contains(where: { $0.id == shelfID && $0.type == 0 }) else {
+            return nil
+        }
+        return shelfID
     }
 
     private func droppedFileKind(for url: URL, isDirectory: Bool) -> DroppedFileKind? {
@@ -1956,7 +2175,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
     /// Registers a single dropped file. Returns the Item id if newly added.
     @discardableResult
-    private func addDroppedFile(url: URL, kind: DroppedFileKind) -> UUID? {
+    private func addDroppedFile(url: URL, kind: DroppedFileKind, targetShelfID: UUID?) -> UUID? {
         let (volumePath, volumeName, relativePath) = PathParser.split(url.path)
 
         // Prevent duplicate (Merge logic). Re-dropping an existing item also
@@ -1964,7 +2183,15 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         let fetchDescriptor = FetchDescriptor<Item>(predicate: #Predicate { $0.relativePath == relativePath })
         if let existing = try? modelContext.fetch(fetchDescriptor).first {
             existing.bookmarkData = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-            addToCurrentStaticShelfIfNeeded(existing)
+            addToStaticShelfIfNeeded(existing, shelfID: targetShelfID)
+            if existing.pages == 0 {
+                schedulePageCountRefreshIfNeeded(
+                    itemID: existing.id,
+                    url: url,
+                    kind: kind,
+                    shouldApplyAutoBookType: false
+                )
+            }
             return existing.id
         }
 
@@ -1987,13 +2214,12 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         // Parse 「(ジャンル)[作者名]タイトル」 from the file name
         let parsed = FileNameParser.parse(fileName: url.lastPathComponent, format: customRenameFormat)
         let title = parsed.title.isEmpty ? url.deletingPathExtension().lastPathComponent : parsed.title
-        let pageCount = kind.shouldUsePageCountForBookType ? ItemFileAccess.listPages(at: url).count : 0
         let parsedBookType = bookTypeIndex(for: parsed.type)
-        let autoBookType = kind.shouldUsePageCountForBookType ? BookTypeAutoClassifier.classify(pageCount: pageCount) : nil
-        let selectedBookType = parsedBookType ?? autoBookType ?? (kind == .helperFile ? 5 : 0)
+        let selectedBookType = parsedBookType ?? (kind == .helperFile ? 5 : 0)
 
+        let itemID = UUID()
         let newItem = Item(
-            id: UUID(),
+            id: itemID,
             volume: volume,
             relativePath: relativePath,
             bookmarkData: itemBookmark,
@@ -2003,21 +2229,59 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             relation: parsed.relation,
             keywordA: parsed.keywordA,
             keywordB: parsed.keywordB,
-            pages: pageCount,
+            pages: 0,
             bookType: selectedBookType,
             fileType: kind.fileType
         )
 
         modelContext.insert(newItem)
-        addToCurrentStaticShelfIfNeeded(newItem)
+        addToStaticShelfIfNeeded(newItem, shelfID: targetShelfID)
+        schedulePageCountRefreshIfNeeded(
+            itemID: itemID,
+            url: url,
+            kind: kind,
+            shouldApplyAutoBookType: parsedBookType == nil
+        )
         return newItem.id
     }
 
-    /// If the user is currently viewing a normal shelf, a dropped file should
-    /// be registered in the library and added to that shelf. Smart shelves are
+    private func schedulePageCountRefreshIfNeeded(
+        itemID: UUID,
+        url: URL,
+        kind: DroppedFileKind,
+        shouldApplyAutoBookType: Bool
+    ) {
+        guard kind.shouldUsePageCountForBookType else { return }
+
+        Task {
+            let update = await Task.detached(priority: .utility) {
+                DroppedFilePageCountUpdate(
+                    itemID: itemID,
+                    pageCount: ItemFileAccess.listPages(at: url).count,
+                    shouldApplyAutoBookType: shouldApplyAutoBookType
+                )
+            }.value
+            applyPageCountUpdate(update)
+        }
+    }
+
+    private func applyPageCountUpdate(_ update: DroppedFilePageCountUpdate) {
+        guard let item = allItems.first(where: { $0.id == update.itemID }) else { return }
+        item.pages = update.pageCount
+        if update.shouldApplyAutoBookType,
+           let autoBookType = BookTypeAutoClassifier.classify(pageCount: update.pageCount) {
+            item.bookType = autoBookType
+        }
+        try? modelContext.save()
+        displayItems = computeFilteredItems()
+        refreshSelectedDisplayIndex()
+    }
+
+    /// A dropped file should be registered in the library and added to the
+    /// normal shelf that was targeted when the drop started. Smart shelves are
     /// condition-based, so they remain automatic and are not manually mutated.
-    private func addToCurrentStaticShelfIfNeeded(_ item: Item) {
-        guard case .shelf(let shelfID) = sidebarSelection,
+    private func addToStaticShelfIfNeeded(_ item: Item, shelfID: UUID?) {
+        guard let shelfID,
               let shelf = shelves.first(where: { $0.id == shelfID && $0.type == 0 }) else {
             return
         }
@@ -2369,6 +2633,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         Button("ファイルをリネーム...") { renameItemFile(item) }
         Button("表紙を編集...") {
             selectedItemID = item.id
+            selectedItemIDs = [item.id]
+            selectionAnchorItemID = item.id
             showCoverEditor = true
         }
         Button("ファイルを再指定...") { reassignItemFile(item) }
@@ -2392,6 +2658,55 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
     // MARK: - File Operations (move / rename / reassign / trash)
 
+    private func selectedItemsForAction() -> [Item] {
+        let selectedIDs = selectedItemIDs.isEmpty
+            ? Set(selectedItemID.map { [$0] } ?? [])
+            : selectedItemIDs
+        return displayItems.filter { selectedIDs.contains($0.id) }
+    }
+
+    private func deleteSelectedItemsFromKeyboard() {
+        let items = selectedItemsForAction()
+        guard !items.isEmpty else { return }
+
+        if case .shelf(let shelfID) = sidebarSelection,
+           let shelf = shelves.first(where: { $0.id == shelfID && $0.type == 0 }) {
+            remove(items, from: shelf)
+        } else {
+            deleteItemsFromLibrary(items)
+        }
+    }
+
+    private func remove(_ items: [Item], from shelf: Shelf) {
+        let ids = Set(items.map(\.id))
+        shelf.items = (shelf.items ?? []).filter { !ids.contains($0.id) }
+        clearSelection(afterRemoving: ids)
+        try? modelContext.save()
+        displayItems = computeFilteredItems()
+        refreshSelectedDisplayIndex()
+    }
+
+    private func deleteItemsFromLibrary(_ items: [Item]) {
+        let ids = Set(items.map(\.id))
+        for item in items {
+            modelContext.delete(item)
+        }
+        clearSelection(afterRemoving: ids)
+        try? modelContext.save()
+        displayItems = computeFilteredItems()
+        refreshSelectedDisplayIndex()
+    }
+
+    private func clearSelection(afterRemoving removedIDs: Set<UUID>) {
+        selectedItemIDs.subtract(removedIDs)
+        if let selectedItemID, removedIDs.contains(selectedItemID) {
+            self.selectedItemID = selectedItemIDs.compactMap { id in displayItems.first { $0.id == id } }.first?.id
+        }
+        if let selectionAnchorItemID, removedIDs.contains(selectionAnchorItemID) {
+            self.selectionAnchorItemID = selectedItemID
+        }
+    }
+
     /// Deletes an item from the library. When trashFile is true the actual
     /// file is also moved to the Trash.
     private func deleteItem(_ item: Item, trashFile: Bool) {
@@ -2403,9 +2718,11 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             }
             resolved.release()
         }
-        if selectedItemID == item.id { selectedItemID = nil }
+        clearSelection(afterRemoving: [item.id])
         modelContext.delete(item)
         try? modelContext.save()
+        displayItems = computeFilteredItems()
+        refreshSelectedDisplayIndex()
     }
 
     /// Moves the item's file into a user-selected folder, updating its
@@ -2527,6 +2844,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         modelContext.delete(item)
         try? modelContext.save()
         selectedItemID = nil
+        selectedItemIDs.removeAll()
+        selectionAnchorItemID = nil
     }
 
     private func deleteShelf(_ shelf: Shelf) {
@@ -2775,6 +3094,25 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         let newShelf = Shelf(title: "新規シェルフ", icon: 0, type: 0, sortOrder: nextShelfSortOrder(type: 0))
         modelContext.insert(newShelf)
         try? modelContext.save()
+
+        var orderIDs = staticShelfOrderIDs.isEmpty ? orderedShelves(type: 0).map(\.id) : staticShelfOrderIDs
+        orderIDs.removeAll { $0 == newShelf.id }
+        orderIDs.append(newShelf.id)
+        staticShelfOrderIDs = orderIDs
+
+        sidebarSelection = .shelf(newShelf.id)
+        editingShelfID = newShelf.id
+        editingShelfTitle = newShelf.title
+        pendingSidebarScrollShelfID = newShelf.id
+    }
+
+    private func commitEditingShelfTitle(_ shelf: Shelf) {
+        let trimmedTitle = editingShelfTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        shelf.title = trimmedTitle.isEmpty ? "新規シェルフ" : trimmedTitle
+        try? modelContext.save()
+        editingShelfID = nil
+        editingShelfTitle = ""
+        focusedShelfTitleID = nil
     }
 
     // MARK: - Dialog views
