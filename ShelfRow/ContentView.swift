@@ -208,8 +208,6 @@ struct ContentView: View {
     @State private var staticShelfOrderIDs: [UUID] = []
     @State private var smartShelfOrderIDs: [UUID] = []
 
-    // Inspector focus (stamps target)
-    @FocusState private var focusedField: InspectorField?
     @FocusState private var mainContentHasFocus: Bool
 
     private var selectedItem: Item? {
@@ -1412,14 +1410,6 @@ struct ContentView: View {
 
                 Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
 
-                // スタンプ: click to append a registered keyword to the focused field
-                StampBarView { stamp in
-                    applyStamp(stamp, to: item)
-                }
-                .padding(.horizontal, 20)
-
-                Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
-
                 VStack(alignment: .leading, spacing: 4) {
                     Text("登録日: \(item.addedDate.formatted(date: .numeric, time: .omitted))")
                     if let lastRead = item.lastReadDate {
@@ -1460,7 +1450,6 @@ struct ContentView: View {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
                     )
-                    .focused($focusedField, equals: field)
             }
 
             keywordSearchButton(field: field, text: text.wrappedValue)
@@ -1541,23 +1530,6 @@ struct ContentView: View {
         NotificationCenter.default.post(name: .keywordEquivalenceEditRequested, object: nil)
         openSettings()
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    /// Appends a stamp keyword to the currently focused inspector field
-    /// (falls back to キーワードA when nothing is focused).
-    private func applyStamp(_ stamp: String, to item: Item) {
-        func append(_ value: String) -> String {
-            value.isEmpty ? stamp : value + " " + stamp
-        }
-        switch focusedField ?? .keywordA {
-        case .title:    item.title = append(item.title)
-        case .author:   item.author = append(item.author)
-        case .keywordA: item.keywordA = append(item.keywordA)
-        case .keywordB: item.keywordB = append(item.keywordB)
-        case .memo:     item.memo = append(item.memo)
-        case .genre:    item.genre = append(item.genre)
-        case .relation: item.relation = append(item.relation)
-        }
     }
 
     // MARK: - Classic Status Bar (Bottom Bar)

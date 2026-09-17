@@ -4,6 +4,15 @@
 
 ## User settings
 xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+## Build products
+build/
+DerivedData/
+Products/
+*.app
+*.xctest
 
 ## Obj-C/Swift specific
 *.hmap
@@ -60,3 +69,9 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# macOS
+.DS_Store
+
+# Documentation image captures
+documents/screenshots/
