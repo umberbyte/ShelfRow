@@ -42,6 +42,23 @@ nonisolated enum PathParser {
     }
 }
 
+/// Applies ShelfRow's lightweight automatic book-type rules for newly added
+/// ZIPs/folders. Non-book media types are intentionally not inferred here.
+nonisolated enum BookTypeAutoClassifier {
+    static func classify(pageCount: Int) -> Int? {
+        switch pageCount {
+        case 21...:
+            return 0 // 厚い本
+        case 11...20:
+            return 1 // 薄い本
+        case 1...10:
+            return 2 // 本の一部
+        default:
+            return nil
+        }
+    }
+}
+
 /// Returns the customized name if set, otherwise the classic default label.
 @inline(__always)
 nonisolated func customName(_ value: String, default defaultName: String) -> String {
@@ -56,10 +73,26 @@ nonisolated func customName(_ value: String, default defaultName: String) -> Str
 /// a simple alphabetical-first pick can grab a garbage image instead.
 nonisolated enum CoverSelector {
 
+    struct ImageCharacteristics {
+        let width: Int
+        let height: Int
+        let isMonochrome: Bool
+
+        var isLandscape: Bool { width > height }
+        var isPortrait: Bool { height > width }
+    }
+
     /// Minimum member count for a file group to be trusted as 連番 (sequence).
     private static let minimumSequenceLength = 3
 
     static func bestCoverPage(from pages: [BookPage]) -> BookPage? {
+        guard !pages.isEmpty else { return nil }
+        return bestSequentialCoverPage(from: pages) ?? pages.first
+    }
+
+    /// Returns the first image in the largest numbered sequence, or nil when
+    /// no trustworthy sequence exists.
+    static func bestSequentialCoverPage(from pages: [BookPage]) -> BookPage? {
         guard !pages.isEmpty else { return nil }
 
         struct NumberedPage {
@@ -88,8 +121,7 @@ nonisolated enum CoverSelector {
             }?.page
         }
 
-        // Fallback: first image in name order (pages are pre-sorted)
-        return pages.first
+        return nil
     }
 
     /// Extracts the last numeric run in a file base name, returning its value
@@ -125,15 +157,211 @@ nonisolated enum CoverSelector {
         return ordered
     }
 
+    /// Selects cover image data for thumbnail repair/generation.
+    ///
+    /// Rule:
+    /// 1. Use the first image in the largest numbered sequence.
+    /// 2. If that image is monochrome, fallback to the first portrait,
+    ///    non-monochrome image in name order.
+    /// 3. If no trustworthy sequence exists, use the first portrait,
+    ///    non-monochrome image in name order.
+    static func preferredCoverData(bookURL: URL) -> Data? {
+        let pages = ItemFileAccess.listPages(at: bookURL)
+        if let sequenceFirst = bestSequentialCoverPage(from: pages),
+           let sequenceData = ItemFileAccess.loadPageData(bookURL: bookURL, page: sequenceFirst),
+           let sequenceCharacteristics = imageCharacteristics(from: sequenceData),
+           !sequenceCharacteristics.isMonochrome {
+            return sequenceData
+        }
+
+        for page in pages {
+            guard let data = ItemFileAccess.loadPageData(bookURL: bookURL, page: page),
+                  let characteristics = imageCharacteristics(from: data),
+                  characteristics.isPortrait,
+                  !characteristics.isMonochrome else {
+                continue
+            }
+            return data
+        }
+
+        return nil
+    }
+
     /// Reads the pixel dimensions of an image file without decoding it.
     static func imagePixelSize(at url: URL) -> (width: Int, height: Int)? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        guard imageFileLooksComplete(at: url),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = props[kCGImagePropertyPixelWidth] as? Int,
               let height = props[kCGImagePropertyPixelHeight] as? Int else {
             return nil
         }
         return (width, height)
+    }
+
+    static func imageCharacteristics(at url: URL) -> ImageCharacteristics? {
+        guard imageFileLooksComplete(at: url),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return imageCharacteristics(from: source)
+    }
+
+    static func imageIsMonochrome(at url: URL) -> Bool {
+        guard imageFileLooksComplete(at: url),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return false }
+        return isMonochrome(source)
+    }
+
+    static func imageCharacteristics(from data: Data) -> ImageCharacteristics? {
+        guard imageDataLooksComplete(data),
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return imageCharacteristics(from: source)
+    }
+
+    /// Cheap container-level completeness checks to avoid handing obviously
+    /// truncated images to ImageIO, which otherwise logs IIOScanner EOF warnings.
+    static func imageDataLooksComplete(_ data: Data) -> Bool {
+        guard data.count >= 4 else { return false }
+        let bytes = [UInt8](data.prefix(32))
+
+        // JPEG: SOI ... EOI
+        if bytes.count >= 2, bytes[0] == 0xFF, bytes[1] == 0xD8 {
+            return data.count >= 4 && data[data.index(data.endIndex, offsetBy: -2)] == 0xFF && data[data.index(before: data.endIndex)] == 0xD9
+        }
+
+        // PNG: signature ... IEND chunk trailer
+        let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        if bytes.starts(with: pngSignature) {
+            let iendTrailer: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82]
+            return data.count >= iendTrailer.count && data.suffix(iendTrailer.count).elementsEqual(iendTrailer)
+        }
+
+        // GIF: GIF87a/GIF89a ... trailer byte
+        if bytes.count >= 6,
+           (bytes.prefix(6).elementsEqual(Array("GIF87a".utf8)) || bytes.prefix(6).elementsEqual(Array("GIF89a".utf8))) {
+            return data.last == 0x3B
+        }
+
+        // WebP: RIFF size WEBP. RIFF size excludes the first 8 bytes.
+        if bytes.count >= 12,
+           bytes[0...3].elementsEqual(Array("RIFF".utf8)),
+           bytes[8...11].elementsEqual(Array("WEBP".utf8)) {
+            let riffSize = Int(bytes[4]) | (Int(bytes[5]) << 8) | (Int(bytes[6]) << 16) | (Int(bytes[7]) << 24)
+            return riffSize >= 4 && riffSize + 8 <= data.count
+        }
+
+        // TIFF/BMP/HEIC and unknown formats are left to ImageIO; they are less
+        // commonly the source of the noisy EOF warnings in this app's workflow.
+        return true
+    }
+
+    static func imageFileLooksComplete(at url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+
+        guard let fileSize = try? handle.seekToEnd(), fileSize >= 4 else { return false }
+        try? handle.seek(toOffset: 0)
+        guard let header = try? handle.read(upToCount: 32), !header.isEmpty else { return false }
+
+        let tailLength = Int(min(fileSize, 16))
+        try? handle.seek(toOffset: fileSize - UInt64(tailLength))
+        let tail = (try? handle.read(upToCount: tailLength)) ?? Data()
+
+        let probe = header + tail
+        if probe.starts(with: Data([0xFF, 0xD8])) {
+            return tail.count >= 2 && tail[tail.index(tail.endIndex, offsetBy: -2)] == 0xFF && tail[tail.index(before: tail.endIndex)] == 0xD9
+        }
+
+        let pngSignature = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        if probe.starts(with: pngSignature) {
+            let iendTrailer = Data([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82])
+            return tail.suffix(iendTrailer.count).elementsEqual(iendTrailer)
+        }
+
+        if header.count >= 6,
+           (header.prefix(6).elementsEqual(Data("GIF87a".utf8)) || header.prefix(6).elementsEqual(Data("GIF89a".utf8))) {
+            return tail.last == 0x3B
+        }
+
+        if header.count >= 12,
+           header.prefix(4).elementsEqual(Data("RIFF".utf8)),
+           header.dropFirst(8).prefix(4).elementsEqual(Data("WEBP".utf8)) {
+            let bytes = [UInt8](header.prefix(8))
+            let riffSize = Int(bytes[4]) | (Int(bytes[5]) << 8) | (Int(bytes[6]) << 16) | (Int(bytes[7]) << 24)
+            return riffSize >= 4 && riffSize + 8 <= fileSize
+        }
+
+        return true
+    }
+
+    private static func imageCharacteristics(from source: CGImageSource) -> ImageCharacteristics? {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int else {
+            return nil
+        }
+        return ImageCharacteristics(
+            width: width,
+            height: height,
+            isMonochrome: isMonochrome(source)
+        )
+    }
+
+    private static func isMonochrome(_ source: CGImageSource) -> Bool {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 64
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return false
+        }
+
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return false }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        let rendered = pixels.withUnsafeMutableBytes { buffer in
+            guard let baseAddress = buffer.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else {
+                return false
+            }
+
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return false }
+
+        var coloredPixels = 0
+        var visiblePixels = 0
+        let tolerance = 6
+        for offset in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
+            let alpha = Int(pixels[offset + 3])
+            guard alpha > 12 else { continue }
+            visiblePixels += 1
+
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            let blue = Int(pixels[offset + 2])
+            let maxChannel = max(red, green, blue)
+            let minChannel = min(red, green, blue)
+            if maxChannel - minChannel > tolerance {
+                coloredPixels += 1
+            }
+        }
+
+        guard visiblePixels > 0 else { return false }
+        return Double(coloredPixels) / Double(visiblePixels) < 0.01
     }
 }
 
@@ -148,9 +376,24 @@ nonisolated enum FileNameParser {
         var genre = ""
         var author = ""
         var title = ""
+        var keywordA = ""
+        var keywordB = ""
+        var relation = ""
+        var type = ""
     }
 
     static func parse(fileName: String) -> ParsedName {
+        parseClassic(fileName: fileName)
+    }
+
+    static func parse(fileName: String, format: String) -> ParsedName {
+        if let parsed = parseWithFormat(fileName: fileName, format: format) {
+            return parsed
+        }
+        return parseClassic(fileName: fileName)
+    }
+
+    private static func parseClassic(fileName: String) -> ParsedName {
         var rest = ((fileName as NSString).lastPathComponent as NSString).deletingPathExtension
             .trimmingCharacters(in: .whitespaces)
         var result = ParsedName()
@@ -184,6 +427,99 @@ nonisolated enum FileNameParser {
         result.genre = result.genre.trimmingCharacters(in: .whitespaces)
         result.author = result.author.trimmingCharacters(in: .whitespaces)
         return result
+    }
+
+    private static func parseWithFormat(fileName: String, format: String) -> ParsedName? {
+        let format = format.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !format.isEmpty else { return nil }
+
+        let placeholders = ["@keywordA", "@keywordB", "@relation", "@author", "@title", "@genre", "@type"]
+        var regex = "^"
+        var captures: [String] = []
+        var index = format.startIndex
+
+        while index < format.endIndex {
+            if let placeholder = placeholders.first(where: { format[index...].hasPrefix($0) }) {
+                let remaining = String(format[format.index(index, offsetBy: placeholder.count)..<format.endIndex])
+                let hasFollowingLiteral = placeholders.contains { remaining.contains($0) } || !remaining.isEmpty
+                regex += hasFollowingLiteral ? "(.+?)" : "(.+)"
+                captures.append(placeholder)
+                index = format.index(index, offsetBy: placeholder.count)
+            } else {
+                let start = index
+                repeat {
+                    index = format.index(after: index)
+                } while index < format.endIndex && !placeholders.contains(where: { format[index...].hasPrefix($0) })
+                regex += escapedLiteralPattern(String(format[start..<index]))
+            }
+        }
+
+        regex += "$"
+        guard !captures.isEmpty,
+              let expression = try? NSRegularExpression(pattern: regex) else {
+            return nil
+        }
+
+        let baseName = ((fileName as NSString).lastPathComponent as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(baseName.startIndex..<baseName.endIndex, in: baseName)
+        guard let match = expression.firstMatch(in: baseName, range: range),
+              match.numberOfRanges == captures.count + 1 else {
+            return nil
+        }
+
+        var result = ParsedName()
+        for (offset, placeholder) in captures.enumerated() {
+            let valueRange = match.range(at: offset + 1)
+            guard let swiftRange = Range(valueRange, in: baseName) else { continue }
+            let value = String(baseName[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            switch placeholder {
+            case "@author": result.author = value
+            case "@title": result.title = stripTrailingSquareGroups(value)
+            case "@keywordA": result.keywordA = value
+            case "@keywordB": result.keywordB = value
+            case "@relation": result.relation = value
+            case "@genre": result.genre = value
+            case "@type": result.type = value
+            default: break
+            }
+        }
+
+        return result
+    }
+
+    private static func escapedLiteralPattern(_ literal: String) -> String {
+        var pattern = ""
+        var whitespaceOpen = false
+        var hasNonWhitespace = false
+        for scalar in literal.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                whitespaceOpen = true
+                continue
+            }
+            if whitespaceOpen {
+                pattern += "\\s*"
+                whitespaceOpen = false
+            }
+            hasNonWhitespace = true
+            pattern += NSRegularExpression.escapedPattern(for: String(scalar))
+        }
+        if whitespaceOpen {
+            // Pure-whitespace separator between two placeholders must require at
+            // least one space so that lazy captures match whole tokens (e.g. "#青")
+            // rather than stopping at the first character (e.g. "#").
+            pattern += hasNonWhitespace ? "\\s*" : "\\s+"
+        }
+        return pattern
+    }
+
+    private static func stripTrailingSquareGroups(_ value: String) -> String {
+        var title = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        while title.hasSuffix("]"), let openIndex = trailingGroupOpenIndex(title, open: "[", close: "]"),
+              openIndex > title.startIndex {
+            title = String(title[..<openIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return title
     }
 
     /// Consumes a balanced leading group like "(...)" and returns

@@ -282,6 +282,7 @@ actor LibraryImporter {
                 title: title,
                 icon: icon,
                 type: type,
+                sortOrder: playlistsProcessed * 10,
                 sortAscending: sortAscending,
                 sortKey: sortKey,
                 smartConditionsJson: conditionsJson

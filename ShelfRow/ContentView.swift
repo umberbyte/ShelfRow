@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
+import AppKit
 
 enum SidebarSelection: Hashable {
     case allBooks
@@ -18,6 +19,83 @@ enum SidebarSelection: Hashable {
 /// Inspector text fields that can receive stamps (スタンプ) input.
 enum InspectorField: Hashable {
     case title, author, keywordA, keywordB, memo, genre, relation
+}
+
+private struct ThumbnailRepairScanResult: Sendable {
+    var itemIDs: [UUID]
+    var monochromeCount: Int
+    var landscapeCount: Int
+
+    nonisolated init(itemIDs: [UUID] = [], monochromeCount: Int = 0, landscapeCount: Int = 0) {
+        self.itemIDs = itemIDs
+        self.monochromeCount = monochromeCount
+        self.landscapeCount = landscapeCount
+    }
+
+    nonisolated func merged(with other: ThumbnailRepairScanResult) -> ThumbnailRepairScanResult {
+        ThumbnailRepairScanResult(
+            itemIDs: itemIDs + other.itemIDs,
+            monochromeCount: monochromeCount + other.monochromeCount,
+            landscapeCount: landscapeCount + other.landscapeCount
+        )
+    }
+}
+
+private struct SmartShelfEditorPresentation: Identifiable {
+    let id: String
+    let shelf: Shelf?
+
+    init(shelf: Shelf?) {
+        self.shelf = shelf
+        self.id = shelf.map { "edit-\($0.id.uuidString)" } ?? "new"
+    }
+}
+
+private enum DroppedFileKind: Equatable {
+    case folder
+    case pageCountedArchive
+    case helperFile
+
+    var shouldUsePageCountForBookType: Bool {
+        switch self {
+        case .folder, .pageCountedArchive: return true
+        case .helperFile: return false
+        }
+    }
+
+    var fileType: Int {
+        switch self {
+        case .folder: return 1
+        case .pageCountedArchive: return 2
+        case .helperFile: return 0
+        }
+    }
+}
+
+private struct ShelfDropDelegate: DropDelegate {
+    let targetShelfID: UUID
+    let targetType: Int
+    let draggingShelfID: Binding<UUID?>
+    let moveAction: (UUID, UUID, Int) -> Void
+    let commitAction: (Int) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let sourceID = draggingShelfID.wrappedValue,
+              sourceID != targetShelfID else {
+            return
+        }
+        moveAction(sourceID, targetShelfID, targetType)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        commitAction(targetType)
+        draggingShelfID.wrappedValue = nil
+        return true
+    }
 }
 
 /// Sort keys for the main content view (右クリック > 並び替え, list headers).
@@ -46,9 +124,9 @@ enum ItemSortKey: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openSettings) private var openSettings
 
     // DB Queries
-    @Query(sort: \Volume.name) private var volumes: [Volume]
     @Query(sort: \Item.title) private var allItems: [Item]
     @Query(sort: \Shelf.title) private var shelves: [Shelf]
 
@@ -65,6 +143,8 @@ struct ContentView: View {
     @AppStorage("fieldNameRelation") private var fieldRelation = ""
     @AppStorage("fieldNameKeywordA") private var fieldKeywordA = ""
     @AppStorage("fieldNameKeywordB") private var fieldKeywordB = ""
+    @AppStorage("customRenameFormat") private var customRenameFormat = "[@author] @title"
+    @AppStorage("keywordEquivalenceRulesJson") private var keywordEquivalenceRulesJson = "[]"
 
     @AppStorage("advancedPasswordLockEnabled") private var lockEnabled = false
     @AppStorage("advancedPasswordValue") private var passwordValue = ""
@@ -74,12 +154,14 @@ struct ContentView: View {
     @AppStorage("slideshowHelperFullPath") private var slideshowHelperFullPath = ""
     @AppStorage("zipHelperPath") private var zipHelperName = ""
     @AppStorage("zipHelperFullPath") private var zipHelperFullPath = ""
-    @AppStorage("helperExtensionsList") private var helperExtensionsList = "mov, avi, mpg\nrar"
+    @AppStorage("helperExtensionsList") private var helperExtensionsList = "mov, avi, mpg\nrar, zip, 7z"
     @AppStorage("helperApplicationsList") private var helperApplicationsList = "\n"
 
     // UI Selection and view states
     @State private var sidebarSelection: SidebarSelection? = .allBooks
     @State private var selectedItemID: UUID? = nil
+    @State private var selectedDisplayIndex: Int? = nil
+    @State private var lastKeyboardScrollIndex: Int? = nil
     @AppStorage("mainViewIsGrid") private var isGridView = false
 
     // Live Filters (classic toolbar segments)
@@ -114,8 +196,7 @@ struct ContentView: View {
 
     // Sheet triggers
     @State private var showVolumeManager = false
-    @State private var showSmartShelfEditor = false
-    @State private var editingSmartShelf: Shelf? = nil
+    @State private var smartShelfEditorPresentation: SmartShelfEditorPresentation? = nil
     @State private var showCoverEditor = false
     @State private var showMissingFileAlert = false
     @State private var missingFileDetail = ""
@@ -123,6 +204,9 @@ struct ContentView: View {
 
     // Drag & drop batch registration state
     @State private var dropQueueRemaining = 0
+    @State private var draggingShelfID: UUID? = nil
+    @State private var staticShelfOrderIDs: [UUID] = []
+    @State private var smartShelfOrderIDs: [UUID] = []
 
     // Inspector focus (stamps target)
     @FocusState private var focusedField: InspectorField?
@@ -130,6 +214,14 @@ struct ContentView: View {
 
     private var selectedItem: Item? {
         guard let selectedID = selectedItemID else { return nil }
+        if let index = selectedDisplayIndex,
+           displayItems.indices.contains(index),
+           displayItems[index].id == selectedID {
+            return displayItems[index]
+        }
+        if let visible = displayItems.first(where: { $0.id == selectedID }) {
+            return visible
+        }
         return allItems.first(where: { $0.id == selectedID })
     }
 
@@ -142,46 +234,68 @@ struct ContentView: View {
          customName(movieType, default: "ムービー")]
     }
 
+    private var currentCollectionTitle: String {
+        switch sidebarSelection {
+        case .allBooks:
+            return "すべての項目"
+        case .unreadBooks:
+            return "未読"
+        case .shelf(let shelfID):
+            return shelves.first(where: { $0.id == shelfID })?.title ?? "シェルフ"
+        case .none:
+            return "すべての項目"
+        }
+    }
+
+    private var modernSurfaceColor: Color {
+        Color(red: 0.055, green: 0.065, blue: 0.075)
+    }
+
+    private var modernPanelColor: Color {
+        Color(red: 0.105, green: 0.120, blue: 0.140)
+    }
+
     var body: some View {
         ZStack {
             if isLocked {
                 // Classic Password Lock Screen
                 passwordLockScreen
             } else {
-                // Main Application Window (Classic 3-Pane Structure)
+                // Main Application Window (Modern 3-Pane Structure)
                 VStack(spacing: 0) {
-                    // 1. Classic Toolbar Header (buttons left, filters center, search right)
-                    classicToolbarView
-
-                    Divider()
-
-                    // 2. Main Navigation Split view
-                    NavigationSplitView {
+                    // Three-pane split view. The side panes keep their
+                    // user-adjusted widths; window resizing is absorbed by the
+                    // flexible list/grid pane in the middle.
+                    HSplitView {
                         sidebarPane
-                            .navigationSplitViewColumnWidth(min: 210, ideal: 230)
-                    } content: {
+                            .frame(minWidth: 240, idealWidth: 260, maxWidth: 360)
+                            .background(SplitViewAutosave(name: "ShelfRow.MainSplitView"))
+
                         mainContentPane
-                            .navigationSplitViewColumnWidth(min: 400, ideal: 550)
-                    } detail: {
+                            .frame(minWidth: 620, maxWidth: .infinity)
+
                         detailPane
-                            .navigationSplitViewColumnWidth(min: 250, ideal: 280)
+                            .frame(minWidth: 300, idealWidth: 320, maxWidth: 440)
                     }
-
-                    Divider()
-
-                    // 3. Classic Status Bar (Bottom bar showing item count)
-                    classicStatusBarView
                 }
+                .background(modernSurfaceColor)
             }
         }
+        .frame(minWidth: 1160, minHeight: 680)
         .sheet(isPresented: $showVolumeManager) {
             VolumeRelocationView(isPresented: $showVolumeManager)
         }
         .sheet(isPresented: $showImportResult) {
             importResultView
         }
-        .sheet(isPresented: $showSmartShelfEditor) {
-            SmartShelfEditorView(isPresented: $showSmartShelfEditor, editingShelf: editingSmartShelf)
+        .sheet(item: $smartShelfEditorPresentation) { presentation in
+            SmartShelfEditorView(
+                isPresented: Binding(
+                    get: { smartShelfEditorPresentation != nil },
+                    set: { if !$0 { smartShelfEditorPresentation = nil } }
+                ),
+                editingShelf: presentation.shelf
+            )
         }
         .sheet(isPresented: $showCoverEditor) {
             if let item = selectedItem {
@@ -219,11 +333,20 @@ struct ContentView: View {
             if lockEnabled && !passwordValue.isEmpty {
                 isLocked = true
             }
+            syncShelfOrderStateFromModel()
+        }
+        .onChange(of: shelfOrderSourceToken) { _, _ in
+            guard draggingShelfID == nil else { return }
+            syncShelfOrderStateFromModel()
         }
         // Supporting Drag & Drop to Import Files seamlessly in initial or running states
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleFileDrop(providers: providers)
             return true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .maintenanceActionRequested)) { notification in
+            guard let action = notification.object as? MaintenanceAction else { return }
+            runMaintenanceAction(action)
         }
     }
 
@@ -234,10 +357,10 @@ struct ContentView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.secondary)
 
-            Text("Stackroomはロックされています。")
+            Text("ShelfRowはロックされています。")
                 .font(.headline)
 
-            SecureField("パスワードを入力してください", text: $passwordInput, onCommit: unlockLibrary)
+            TextField("パスワードを入力してください", text: $passwordInput, onCommit: unlockLibrary)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 220)
                 .multilineTextAlignment(.center)
@@ -269,155 +392,166 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Classic Toolbar (buttons left, filter segments center, search right)
-    private var classicToolbarView: some View {
-        HStack(spacing: 0) {
-            Group {
-                toolbarButton(title: "スライドショー", icon: "play.rectangle.fill") {
-                    if let item = selectedItem {
-                        startSlideshow(item)
+    // MARK: - Modern Main Header
+    private var modernMainHeader: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(currentCollectionTitle)
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("\(displayItems.count.formatted()) 項目")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+
+                Spacer(minLength: 16)
+
+                viewModeSwitcher
+
+                Menu {
+                    sortMenuItems
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: sortAscending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                        Text("並び替え")
+                            .font(.system(size: 13, weight: .semibold))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.65))
                     }
+                    .foregroundStyle(.white)
                 }
-                .disabled(selectedItemID == nil)
+                .menuStyle(.borderlessButton)
+                .frame(width: 116, height: 36, alignment: .center)
+                .background(headerControlBackground)
+                .contentShape(Rectangle())
 
-                toolbarSeparator
-
-                toolbarButton(title: "ゴミ箱に入れる", icon: "trash.fill") {
-                    deleteSelectedItem()
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.white.opacity(0.62))
+                    TextField("検索", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white)
                 }
-                .disabled(selectedItemID == nil)
-
-                toolbarSeparator
-
-                toolbarButton(title: "Finderで表示", icon: "folder.fill") {
-                    if let item = selectedItem {
-                        revealInFinder(item)
-                    }
-                }
-                .disabled(selectedItemID == nil)
-
-                toolbarSeparator
-
-                toolbarButton(title: "未読チェック", icon: "checkmark.circle.fill") {
-                    selectedItem?.isUnread.toggle()
-                }
-                .disabled(selectedItemID == nil)
-
-                toolbarButton(title: "表紙を編集", icon: "photo.artframe") {
-                    showCoverEditor = true
-                }
-                .disabled(selectedItemID == nil)
-
-                toolbarSeparator
-
-                toolbarButton(title: isLocked ? "アンロック" : "ロック", icon: isLocked ? "lock.open.fill" : "lock.fill") {
-                    if lockEnabled && !passwordValue.isEmpty {
-                        isLocked = true
-                    }
-                }
-                .disabled(!lockEnabled || passwordValue.isEmpty)
+                .padding(.horizontal, 12)
+                .frame(width: 300, height: 36)
+                .background(headerControlBackground)
             }
 
-            Spacer(minLength: 12)
-
-            // Center filter segments (classic Stackroom top-center filters)
             classicFilterSegments
-
-            Spacer(minLength: 12)
-
-            // Search field integrated into the classic bar
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
-                TextField("検索", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .frame(width: 150)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(6)
-            .padding(.trailing, 12)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 6)
-        .background(Color(NSColor.windowBackgroundColor))
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+        .background(
+            LinearGradient(
+                colors: [Color.white.opacity(0.045), Color.white.opacity(0.015)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 
-    private func toolbarButton(title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 22))
-                    .symbolRenderingMode(.hierarchical)
-                    .frame(height: 24)
-                Text(title)
-                    .font(.system(size: 11))
+    private var headerControlBackground: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(Color.white.opacity(0.075))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+    }
+
+    private var viewModeSwitcher: some View {
+        HStack(spacing: 4) {
+            viewModeButton(title: "リスト", icon: "list.bullet", isSelected: !isGridView) {
+                isGridView = false
             }
-            .frame(width: 84, height: 52)
-            .foregroundColor(.primary.opacity(0.85))
+            viewModeButton(title: "グリッド", icon: "square.grid.2x2", isSelected: isGridView) {
+                isGridView = true
+            }
+        }
+        .padding(4)
+        .frame(height: 42)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.075))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        )
+    }
+
+    private func viewModeButton(title: String, icon: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 86, height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(isSelected ? Color.accentColor : Color.clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    private var toolbarSeparator: some View {
-        Divider()
-            .frame(height: 40)
-            .padding(.horizontal, 2)
-    }
-
-    // MARK: - Classic Filter Segments (未読 / レート / 種類, multi-selectable)
+    // MARK: - Modern Filter Segments (未読 / レート / 種類, multi-selectable)
     private var classicFilterSegments: some View {
-        HStack(spacing: 12) {
-            // 1. Unread Filter: ALL | O
-            HStack(spacing: 0) {
-                filterOptionButton(title: "ALL", isSelected: unreadFilterSelection == 0) {
-                    unreadFilterSelection = 0
-                }
-                filterSegment(isSelected: unreadFilterSelection == 1) {
-                    unreadFilterSelection = 1
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 14) {
+                filterSegment(isSelected: unreadFilterSelection == 1, minWidth: 86) {
+                    unreadFilterSelection = unreadFilterSelection == 1 ? 0 : 1
                 } label: {
-                    Circle()
-                        .stroke(Color.green, lineWidth: 2.5)
-                        .frame(width: 14, height: 14)
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 14, height: 14)
+                            .shadow(color: .green.opacity(0.55), radius: 5)
+                        Text("未読")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
                 }
-            }
-            .border(Color.gray.opacity(0.4), width: 1)
 
-            // 2. Type Filter: ALL + 6 colored type icons
-            HStack(spacing: 0) {
-                filterOptionButton(title: "ALL", isSelected: typeFilterSelection.isEmpty) {
+                verticalFilterSeparator
+
+                Text("種別")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
+
+                filterTypeButton(index: nil, title: "すべて", isSelected: typeFilterSelection.isEmpty) {
                     typeFilterSelection.removeAll()
                 }
+
                 ForEach(0..<BookTypeInfo.count, id: \.self) { idx in
-                    filterSegment(isSelected: typeFilterSelection.contains(idx)) {
+                    filterTypeButton(index: idx, title: typeNames[idx], isSelected: typeFilterSelection.contains(idx)) {
                         if typeFilterSelection.contains(idx) {
                             typeFilterSelection.remove(idx)
                         } else {
                             typeFilterSelection.insert(idx)
                         }
-                    } label: {
-                        Image(systemName: BookTypeInfo.systemImage(for: idx))
-                            .font(.system(size: 15))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundColor(BookTypeInfo.color(for: idx))
-                            .frame(width: 20, height: 18)
                     }
-                    .help(typeNames[idx])
                 }
             }
-            .border(Color.gray.opacity(0.4), width: 1)
 
-            // 3. Rating Filter: ALL | ★ | ★★ | ... (multi-select)
-            HStack(spacing: 0) {
-                filterOptionButton(title: "ALL", isSelected: ratingFilterSelection.isEmpty) {
-                    ratingFilterSelection.removeAll()
-                }
+            HStack(spacing: 14) {
+                verticalFilterSeparator
+
+                Text("評価")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
+
                 ForEach(1...5, id: \.self) { rate in
-                    filterSegment(isSelected: ratingFilterSelection.contains(rate)) {
+                    filterSegment(isSelected: ratingFilterSelection.contains(rate), minWidth: 72) {
                         if ratingFilterSelection.contains(rate) {
                             ratingFilterSelection.remove(rate)
                         } else {
@@ -427,26 +561,49 @@ struct ContentView: View {
                         starRow(count: rate, filled: ratingFilterSelection.contains(rate))
                     }
                 }
-            }
-            .border(Color.gray.opacity(0.4), width: 1)
 
-            // Grid vs List mode switches
-            Picker("", selection: $isGridView) {
-                Image(systemName: "square.grid.3x3").tag(true)
-                Image(systemName: "list.bullet").tag(false)
+                Spacer()
+
+                Button("フィルタをクリア") {
+                    unreadFilterSelection = 0
+                    typeFilterSelection.removeAll()
+                    ratingFilterSelection.removeAll()
+                    searchText = ""
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .padding(.horizontal, 18)
+                .frame(height: 36)
+                .background(headerControlBackground)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 72)
-            .controlSize(.large)
         }
     }
 
-    private func filterOptionButton(title: String, isSelected: Bool, fontSize: CGFloat = 13, action: @escaping () -> Void) -> some View {
-        filterSegment(isSelected: isSelected, action: action) {
-            Text(title)
-                .font(.system(size: fontSize, weight: isSelected ? .bold : .regular))
+    private var verticalFilterSeparator: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.22))
+            .frame(width: 1, height: 20)
+    }
+
+    private func filterTypeButton(index: Int?, title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        filterSegment(isSelected: isSelected, minWidth: 78, action: action) {
+            HStack(spacing: 7) {
+                if let index {
+                    Image(systemName: BookTypeInfo.systemImage(for: index))
+                        .font(.system(size: 15))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(BookTypeInfo.color(for: index))
+                } else {
+                    Image(systemName: "books.vertical.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.yellow)
+                }
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+            }
         }
+        .help(title)
     }
 
     /// A compact star-with-number label used by the rating filter (★1 … ★5).
@@ -454,136 +611,323 @@ struct ContentView: View {
         HStack(spacing: 2) {
             Image(systemName: "star.fill")
                 .font(.system(size: 11))
-                .foregroundColor(filled ? .blue : .yellow)
+                .foregroundStyle(filled ? .white : .white.opacity(0.9))
             Text("\(count)")
                 .font(.system(size: 12, weight: filled ? .bold : .regular))
-                .foregroundColor(filled ? .blue : .primary)
+                .foregroundStyle(filled ? .white : .white.opacity(0.88))
         }
     }
 
-    private func filterSegment<Label: View>(isSelected: Bool, action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
+    private func filterSegment<Label: View>(isSelected: Bool, minWidth: CGFloat = 32, action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
         Button(action: action) {
             label()
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, 9)
-                .frame(minWidth: 30, minHeight: 30)
-                .background(isSelected ? Color.blue.opacity(0.25) : Color(NSColor.controlBackgroundColor))
-                .foregroundColor(isSelected ? .blue : .primary)
+                .padding(.horizontal, 14)
+                .frame(minWidth: minWidth, minHeight: 36)
+                .background(
+                    Capsule()
+                        .fill(isSelected ? Color.accentColor : Color.white.opacity(0.075))
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(isSelected ? Color.white.opacity(0.22) : Color.white.opacity(0.14), lineWidth: 1)
+                )
+                .foregroundStyle(.white)
         }
         .buttonStyle(.plain)
+    }
+
+    private func orderedShelves(type: Int) -> [Shelf] {
+        let modelOrder = shelves
+            .filter { $0.type == type }
+            .sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder {
+                    return lhs.sortOrder < rhs.sortOrder
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+        let orderIDs = shelfOrderIDs(type: type)
+        guard !orderIDs.isEmpty else { return modelOrder }
+
+        let modelIDs = Set(modelOrder.map(\.id))
+        let orderIDSet = Set(orderIDs)
+        guard modelIDs == orderIDSet else { return modelOrder }
+
+        let byID = Dictionary(uniqueKeysWithValues: modelOrder.map { ($0.id, $0) })
+        return orderIDs.compactMap { byID[$0] }
+    }
+
+    private func shelfOrderIDs(type: Int) -> [UUID] {
+        type == 0 ? staticShelfOrderIDs : smartShelfOrderIDs
+    }
+
+    private var shelfOrderSourceToken: String {
+        shelves
+            .sorted { lhs, rhs in
+                if lhs.type != rhs.type {
+                    return lhs.type < rhs.type
+                }
+                if lhs.sortOrder != rhs.sortOrder {
+                    return lhs.sortOrder < rhs.sortOrder
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            .map { "\($0.type):\($0.id.uuidString):\($0.sortOrder):\($0.title)" }
+            .joined(separator: "|")
+    }
+
+    private func syncShelfOrderStateFromModel() {
+        staticShelfOrderIDs = shelves
+            .filter { $0.type == 0 }
+            .sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder {
+                    return lhs.sortOrder < rhs.sortOrder
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            .map(\.id)
+
+        smartShelfOrderIDs = shelves
+            .filter { $0.type == 1 }
+            .sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder {
+                    return lhs.sortOrder < rhs.sortOrder
+                }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            .map(\.id)
     }
 
     // MARK: - Sidebar Pane
     private var sidebarPane: some View {
         VStack(spacing: 0) {
-            List(selection: $sidebarSelection) {
-                Section("ライブラリ") {
-                    NavigationLink(value: SidebarSelection.allBooks) {
-                        Label("すべての本", systemImage: "books.vertical")
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    Image(systemName: "book")
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundStyle(.blue)
+                    Text("ShelfRow")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                .padding(.top, 18)
+                .padding(.horizontal, 20)
+            }
+
+            List {
+                Section {
+                    sidebarSelectionButton(.allBooks) {
+                        sidebarLibraryLabel("すべての項目", systemImage: "doc.text", count: allItems.count)
                     }
-                    NavigationLink(value: SidebarSelection.unreadBooks) {
-                        Label("未読の本", systemImage: "book")
+                    sidebarSelectionButton(.unreadBooks) {
+                        sidebarLibraryLabel("未読", systemImage: "circle.fill", count: allItems.filter(\.isUnread).count)
                     }
+                } header: {
+                    sidebarSectionHeader("ライブラリ")
                 }
 
-                Section("お気に入り") {
-                    let staticShelves = shelves.filter { $0.type == 0 }
+                Section {
+                    let staticShelves = orderedShelves(type: 0)
                     ForEach(staticShelves) { shelf in
-                        NavigationLink(value: SidebarSelection.shelf(shelf.id)) {
+                        sidebarSelectionButton(.shelf(shelf.id)) {
                             shelfLabel(shelf)
                         }
+                        .onDrag {
+                            draggingShelfID = shelf.id
+                            return NSItemProvider(object: shelf.id.uuidString as NSString)
+                        }
+                        .onDrop(
+                            of: [.text],
+                            delegate: ShelfDropDelegate(
+                                targetShelfID: shelf.id,
+                                targetType: shelf.type,
+                                draggingShelfID: $draggingShelfID,
+                                moveAction: reorderShelfByDrag,
+                                commitAction: commitShelfDrag
+                            )
+                        )
                         .contextMenu {
                             Button("削除") {
                                 deleteShelf(shelf)
                             }
                         }
                     }
+                } header: {
+                    sidebarSectionHeader("お気に入り")
                 }
 
-                Section("スマートシェルフ") {
-                    let smartShelves = shelves.filter { $0.type == 1 }
+                Section {
+                    let smartShelves = orderedShelves(type: 1)
                     ForEach(smartShelves) { shelf in
-                        NavigationLink(value: SidebarSelection.shelf(shelf.id)) {
+                        sidebarSelectionButton(.shelf(shelf.id)) {
                             shelfLabel(shelf)
                         }
+                        .onDrag {
+                            draggingShelfID = shelf.id
+                            return NSItemProvider(object: shelf.id.uuidString as NSString)
+                        }
+                        .onDrop(
+                            of: [.text],
+                            delegate: ShelfDropDelegate(
+                                targetShelfID: shelf.id,
+                                targetType: shelf.type,
+                                draggingShelfID: $draggingShelfID,
+                                moveAction: reorderShelfByDrag,
+                                commitAction: commitShelfDrag
+                            )
+                        )
                         .contextMenu {
                             Button("編集...") {
-                                editingSmartShelf = shelf
-                                showSmartShelfEditor = true
+                                smartShelfEditorPresentation = SmartShelfEditorPresentation(shelf: shelf)
                             }
                             Button("削除") {
                                 deleteShelf(shelf)
                             }
                         }
                     }
+                } header: {
+                    sidebarSectionHeader("スマートシェルフ")
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
 
             Divider()
 
-            // Classic bottom footer controls [+] and [⚙️]
-            HStack(spacing: 4) {
+            // Bottom footer controls: shelf menu and Settings button.
+            HStack(spacing: 8) {
                 // Add button (+)
                 Menu {
                     Button("新規スマートシェルフ...") {
-                        editingSmartShelf = nil
-                        showSmartShelfEditor = true
+                        smartShelfEditorPresentation = SmartShelfEditorPresentation(shelf: nil)
                     }
                     Button("新規標準シェルフ...") {
                         createStaticShelf()
                     }
                 } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .bold))
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 32)
+                        .contentShape(Rectangle())
                 }
-                .menuStyle(.button)
-                .frame(width: 26, height: 20)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .background(modernIconButtonBackground)
 
-                // Settings action button (⚙️)
-                Menu {
-                    SettingsLink {
-                        Text("環境設定...")
-                    }
-                    Button("ボリューム管理...") {
-                        showVolumeManager = true
-                    }
-                    Button("XMLライブラリのインポート...") {
-                        importXMLLibrary()
-                    }
-                    Button("旧Stackroomサムネイルの移行...") {
-                        migrateLegacyThumbnails()
-                    }
-                    Button("サムネイルの一括修正...") {
-                        repairThumbnails()
-                    }
-                    Button("ファイル名からタイトルを補完...") {
-                        repairEmptyTitles()
-                    }
-                } label: {
+                SettingsLink {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 12))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 32)
+                        .contentShape(Rectangle())
                 }
-                .menuStyle(.button)
-                .frame(width: 26, height: 20)
+                .buttonStyle(.plain)
+                .background(modernIconButtonBackground)
+                .help("環境設定")
 
                 Spacer()
             }
-            .padding(6)
-            .background(Color(NSColor.windowBackgroundColor))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(Color.white.opacity(0.035))
         }
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.155, green: 0.165, blue: 0.190),
+                    Color(red: 0.105, green: 0.115, blue: 0.140)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
     }
 
-    /// Classic colored folder icon per shelf (smart shelves use the gear-folder look).
-    private func shelfLabel(_ shelf: Shelf) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: shelf.type == 1 ? "gearshape" : "folder.fill")
-                .foregroundColor(shelf.type == 1 ? .purple : BookTypeInfo.folderColor(forIcon: shelf.icon))
-                .font(.system(size: 12))
-            Text(shelf.title)
-                .lineLimit(1)
+    private var modernIconButtonBackground: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(Color.white.opacity(0.08))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.13), lineWidth: 1)
+            )
+    }
+
+    private func sidebarSelectionButton<Label: View>(_ selection: SidebarSelection, @ViewBuilder label: () -> Label) -> some View {
+        Button {
+            sidebarSelection = selection
+        } label: {
+            label()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: 32, alignment: .center)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .listRowInsets(EdgeInsets(top: 2, leading: 10, bottom: 2, trailing: 10))
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(sidebarSelection == selection ? Color.accentColor.opacity(0.95) : Color.clear)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+        )
+    }
+
+    private func sidebarSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.58))
+    }
+
+    private func sidebarLibraryLabel(_ title: String, systemImage: String, count: Int) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(systemImage == "circle.fill" ? .green : .white.opacity(0.9))
+                .frame(width: 22)
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+            Spacer()
+            countBadge(count)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private func countBadge(_ count: Int) -> some View {
+        Text(count.formatted())
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.white.opacity(0.14)))
+    }
+
+    private func shelfItemCount(_ shelf: Shelf) -> Int {
+        if shelf.type == 1 {
+            let conditions = SmartConditionsCodec.decode(shelf.smartConditionsJson)
+            let now = Date()
+            return allItems.filter { SmartConditionsCodec.matches($0, conditions: conditions, now: now) }.count
+        }
+        return shelf.items?.count ?? 0
+    }
+
+    private func shelfLabel(_ shelf: Shelf) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: shelf.type == 1 ? "gearshape" : BookTypeInfo.systemImage(for: shelf.icon))
+                .foregroundStyle(shelf.type == 1 ? .purple : BookTypeInfo.folderColor(forIcon: shelf.icon))
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 22)
+            Text(shelf.title)
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.white)
+            Spacer()
+            countBadge(shelfItemCount(shelf))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 
     // MARK: - List Columns (shared by the header and each row for alignment)
@@ -664,27 +1008,30 @@ struct ContentView: View {
         VStack(spacing: 0) {
             let itemsToDisplay = displayItems
 
+            modernMainHeader
+
+            Divider()
+                .overlay(Color.white.opacity(0.08))
+
             if itemsToDisplay.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "folder")
                         .font(.system(size: 40))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.white.opacity(0.45))
                     Text(allItems.isEmpty ? "ライブラリは空です。" : "該当する本がありません。")
                         .font(.headline)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.white.opacity(0.68))
                     if allItems.isEmpty {
                         Text("ZIPや画像フォルダをここにドラッグ＆ドロップして追加できます。")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.white.opacity(0.58))
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(NSColor.underPageBackgroundColor))
+                .background(modernSurfaceColor)
             } else {
                 if isGridView {
                     // Grid view: sort control bar on top
-                    gridSortBar
-                    Divider()
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 150), spacing: 16)], spacing: 16) {
                             ForEach(itemsToDisplay) { item in
@@ -692,13 +1039,7 @@ struct ContentView: View {
                                 // otherwise the single-tap gesture swallows it.
                                 GridItemCardView(item: item, isSelected: selectedItemID == item.id)
                                     .contentShape(Rectangle()) // full-card hit area
-                                    .simultaneousGesture(TapGesture(count: 1).onEnded {
-                                        selectedItemID = item.id
-                                        mainContentHasFocus = true
-                                    })
-                                    .onTapGesture(count: 2) {
-                                        openItem(item)
-                                    }
+                                    .overlay(clickOverlay(for: item))
                                     .contextMenu {
                                         itemContextMenu(item)
                                     }
@@ -706,7 +1047,7 @@ struct ContentView: View {
                         }
                         .padding()
                     }
-                    .background(Color(NSColor.underPageBackgroundColor))
+                    .background(modernSurfaceColor)
                     .focusable()
                     .focused($mainContentHasFocus)
                     .onKeyPress(.return) {
@@ -730,32 +1071,29 @@ struct ContentView: View {
                             LazyVStack(spacing: 0) {
                                 ForEach(itemsToDisplay.enumerated(), id: \.element.id) { index, item in
                                     classicListRow(item: item, isSelected: selectedItemID == item.id)
-                                        .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 3)
+                                        .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 5)
                                         .background(
-                                            selectedItemID == item.id
-                                                ? Color(NSColor.selectedContentBackgroundColor)
-                                                : (index.isMultiple(of: 2) ? Color(NSColor.alternatingContentBackgroundColors.first ?? .clear) : Color.clear)
+                                            RoundedRectangle(cornerRadius: 7)
+                                                .fill(
+                                                    selectedItemID == item.id
+                                                        ? Color.accentColor.opacity(0.92)
+                                                        : (index.isMultiple(of: 2) ? Color.white.opacity(0.035) : Color.white.opacity(0.015))
+                                                )
                                         )
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1)
                                         .contentShape(Rectangle()) // full-row hit area
                                         .id(item.id)
-                                        // Single-tap selection fires immediately (simultaneous),
-                                        // without waiting to see if it becomes a double-tap.
-                                        .simultaneousGesture(TapGesture(count: 1).onEnded {
-                                            selectedItemID = item.id
-                                            mainContentHasFocus = true
-                                        })
-                                        .onTapGesture(count: 2) {
-                                            openItem(item)
-                                        }
+                                        .overlay(clickOverlay(for: item))
                                         .contextMenu {
                                             itemContextMenu(item)
                                         }
                                 }
                             }
                         }
-                        .background(Color(NSColor.textBackgroundColor))
+                        .background(modernSurfaceColor)
                         .focusable()
                         .focused($mainContentHasFocus)
                         .focusEffectDisabled()
@@ -780,9 +1118,13 @@ struct ContentView: View {
         }
         // Recompute the (cached) filtered/sorted list only when inputs change,
         // not on every selection/keystroke elsewhere.
-        .onAppear { displayItems = computeFilteredItems() }
+        .onAppear {
+            displayItems = computeFilteredItems()
+            refreshSelectedDisplayIndex()
+        }
         .onChange(of: displayToken) { _, _ in
             displayItems = computeFilteredItems()
+            refreshSelectedDisplayIndex()
         }
     }
 
@@ -833,7 +1175,7 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 3) {
                         Text(col.title)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                             .lineLimit(1)
                         if sortKey == col.key {
                             Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
@@ -845,15 +1187,20 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(sortKey == col.key ? .primary : .secondary)
+                .foregroundStyle(sortKey == col.key ? .white : .white.opacity(0.62))
                 .contextMenu {
                     headerContextMenu
                 }
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Color(NSColor.windowBackgroundColor))
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.03))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+        }
         .contextMenu {
             headerContextMenu
         }
@@ -894,8 +1241,8 @@ struct ContentView: View {
     @ViewBuilder
     private func listCell(_ col: ListColumn, _ item: Item, isSelected: Bool) -> some View {
         // Primary/secondary text turns white on the selection highlight.
-        let primaryColor: Color = isSelected ? .white : .primary
-        let secondaryColor: Color = isSelected ? .white.opacity(0.85) : .secondary
+        let primaryColor: Color = .white
+        let secondaryColor: Color = isSelected ? .white.opacity(0.88) : .white.opacity(0.72)
         switch col.key {
         case .unread:
             // Green circle like classic "O"
@@ -905,50 +1252,50 @@ struct ContentView: View {
                 .opacity(item.isUnread ? 1 : 0)
         case .bookType:
             Image(systemName: BookTypeInfo.systemImage(for: item.bookType))
-                .font(.system(size: 13))
+                .font(.system(size: 15))
                 .foregroundColor(isSelected ? .white : BookTypeInfo.color(for: item.bookType))
                 .help(typeNames.indices.contains(item.bookType) ? typeNames[item.bookType] : "")
         case .title:
             Text(item.title)
-                .font(.system(size: 12))
+                .font(.system(size: 14))
                 .foregroundColor(primaryColor)
                 .lineLimit(1)
         case .rating:
             RatingView(rating: .constant(item.rating), interactive: false)
-                .font(.system(size: 9))
+                .font(.system(size: 11))
         case .author:
             Text(item.author)
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .genre:
             Text(item.genre)
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .relation:
             Text(item.relation)
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .keywordA:
             Text(item.keywordA)
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .keywordB:
             Text(item.keywordB)
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .lastReadDate:
             Text(item.lastReadDate?.formatted(date: .numeric, time: .omitted) ?? "—")
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .addedDate:
             Text(item.addedDate.formatted(date: .numeric, time: .omitted))
-                .font(.caption)
+                .font(.system(size: 13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         default:
@@ -965,40 +1312,52 @@ struct ContentView: View {
                 VStack {
                     Image(systemName: "sidebar.right")
                         .font(.system(size: 28))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.white.opacity(0.42))
                     Text("本棚から本を選択してください。")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.white.opacity(0.58))
                         .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(NSColor.windowBackgroundColor))
+                .background(modernPanelColor)
             }
         }
     }
 
     private func classicInspectorView(item: Item) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 16) {
                 // Large cover image on top
                 HStack {
                     Spacer()
                     CoverImageView(item: item)
-                        .frame(width: 140, height: 180)
-                        .cornerRadius(4)
-                        .shadow(radius: 3)
+                        .frame(width: 176, height: 224)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .shadow(color: .black.opacity(0.35), radius: 12, x: 0, y: 6)
                     Spacer()
                 }
-                .padding(.top, 8)
+                .padding(.top, 20)
+
+                Text(item.title)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .padding(.horizontal, 20)
 
                 Toggle("未読にする", isOn: Binding(
                     get: { item.isUnread },
                     set: { item.isUnread = $0 }
                 ))
                 .toggleStyle(.checkbox)
-                .padding(.horizontal)
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 20)
 
-                Divider().padding(.horizontal)
+                Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
 
                 // Form with customized labels from Customize Settings Tab!
                 VStack(spacing: 8) {
@@ -1015,8 +1374,8 @@ struct ContentView: View {
                     HStack {
                         Text("レート:")
                             .font(.caption)
-                            .foregroundColor(.secondary)
-                            .frame(width: 75, alignment: .trailing)
+                            .foregroundStyle(.white.opacity(0.66))
+                            .frame(width: 78, alignment: .trailing)
                         RatingView(rating: Binding(
                             get: { item.rating },
                             set: { item.rating = $0 }
@@ -1049,17 +1408,17 @@ struct ContentView: View {
                         set: { item.relation = $0 }
                     ))
                 }
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 14)
 
-                Divider().padding(.horizontal)
+                Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
 
                 // スタンプ: click to append a registered keyword to the focused field
                 StampBarView { stamp in
                     applyStamp(stamp, to: item)
                 }
-                .padding(.horizontal)
+                .padding(.horizontal, 20)
 
-                Divider().padding(.horizontal)
+                Divider().overlay(Color.white.opacity(0.10)).padding(.horizontal, 20)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("登録日: \(item.addedDate.formatted(date: .numeric, time: .omitted))")
@@ -1070,26 +1429,118 @@ struct ContentView: View {
                         Text("ページ数: \(item.pages)p")
                     }
                 }
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .padding(.horizontal)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.58))
+                .padding(.horizontal, 20)
             }
-            .padding(.bottom, 16)
+            .padding(.bottom, 20)
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(modernPanelColor)
     }
 
     private func inspectorFieldRow(label: String, field: InspectorField, text: Binding<String>) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .frame(width: 75, alignment: .trailing)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.66))
+                    .frame(width: 78, alignment: .trailing)
 
-            TextField("", text: text)
-                .textFieldStyle(.roundedBorder)
-                .focused($focusedField, equals: field)
+                TextField("", text: text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.white.opacity(0.07))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                    .focused($focusedField, equals: field)
+            }
+
+            keywordSearchButton(field: field, text: text.wrappedValue)
+                .padding(.leading, 78 + 8)
         }
+    }
+
+    @ViewBuilder
+    private func keywordSearchButton(field: InspectorField, text: String) -> some View {
+        let keyword = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !keyword.isEmpty && field != .title {
+            Menu {
+                Button("キーワードを検索") {
+                    searchKeyword(keyword, inLibrary: false)
+                }
+                Button("キーワードをライブラリで検索") {
+                    searchKeyword(keyword, inLibrary: true)
+                }
+                if let equivalenceField = keywordEquivalenceField(for: field) {
+                    Divider()
+                    Button("他のキーワードと同一視...") {
+                        openKeywordEquivalenceSettings(field: equivalenceField, term: keyword)
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(keyword)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, minHeight: 25, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.accentColor.opacity(0.45))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .help("キーワードを検索")
+        }
+    }
+
+    private func searchKeyword(_ keyword: String, inLibrary: Bool) {
+        if inLibrary {
+            sidebarSelection = .allBooks
+        }
+        searchText = keyword
+        displayItems = computeFilteredItems()
+        selectedItemID = nil
+        selectedDisplayIndex = nil
+    }
+
+    private func keywordEquivalenceField(for field: InspectorField) -> KeywordEquivalenceField? {
+        switch field {
+        case .author: return .author
+        case .keywordA: return .keywordA
+        case .keywordB: return .keywordB
+        case .memo: return .memo
+        case .genre: return .genre
+        case .relation: return .relation
+        case .title: return nil
+        }
+    }
+
+    private func openKeywordEquivalenceSettings(field: KeywordEquivalenceField, term: String) {
+        KeywordEquivalenceEditRequest.store(field: field, term: term)
+        NotificationCenter.default.post(name: .keywordEquivalenceEditRequested, object: nil)
+        openSettings()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Appends a stamp keyword to the currently focused inspector field
@@ -1181,6 +1632,7 @@ struct ContentView: View {
         return [
             sidebarKey,
             searchText,
+            keywordEquivalenceRulesJson,
             String(unreadFilterSelection),
             ratingFilterSelection.sorted().map(String.init).joined(separator: ","),
             typeFilterSelection.sorted().map(String.init).joined(separator: ","),
@@ -1217,13 +1669,11 @@ struct ContentView: View {
 
         // 2. Search Text
         if !searchText.isEmpty {
-            let lowerText = searchText.lowercased()
-            items = items.filter {
-                $0.title.lowercased().contains(lowerText) ||
-                $0.author.lowercased().contains(lowerText) ||
-                $0.memo.lowercased().contains(lowerText) ||
-                $0.keywordA.lowercased().contains(lowerText) ||
-                $0.keywordB.lowercased().contains(lowerText)
+            let lowerText = KeywordEquivalenceCodec.normalize(searchText)
+            let rules = KeywordEquivalenceCodec.decode(keywordEquivalenceRulesJson)
+            let equivalentTerms = KeywordEquivalenceCodec.searchTerms(for: searchText, rules: rules)
+            items = items.filter { item in
+                itemMatchesSearch(item, normalizedQuery: lowerText, equivalentTerms: equivalentTerms)
             }
         }
 
@@ -1244,6 +1694,29 @@ struct ContentView: View {
 
         // 6. Sort (右クリック > 並び替え)
         return sortItems(items)
+    }
+
+    private func itemMatchesSearch(_ item: Item, normalizedQuery: String, equivalentTerms: [KeywordEquivalenceField: [String]]) -> Bool {
+        let baseValues = [
+            item.title,
+            item.author,
+            item.genre,
+            item.relation,
+            item.memo,
+            item.keywordA,
+            item.keywordB
+        ]
+        if baseValues.contains(where: { KeywordEquivalenceCodec.normalize($0).contains(normalizedQuery) }) {
+            return true
+        }
+
+        for (field, terms) in equivalentTerms {
+            let value = KeywordEquivalenceCodec.normalize(field.value(in: item))
+            if terms.contains(where: { value.contains(KeywordEquivalenceCodec.normalize($0)) }) {
+                return true
+            }
+        }
+        return false
     }
 
     private func sortItems(_ items: [Item]) -> [Item] {
@@ -1290,11 +1763,155 @@ struct ContentView: View {
     /// and scrolls the newly selected row into view.
     private func moveSelection(by delta: Int, proxy: ScrollViewProxy?) {
         guard !displayItems.isEmpty else { return }
-        let currentIndex = displayItems.firstIndex { $0.id == selectedItemID } ?? -1
+        let currentIndex = selectedDisplayIndex ?? displayItems.firstIndex { $0.id == selectedItemID } ?? -1
         let newIndex = min(max(currentIndex + delta, 0), displayItems.count - 1)
         let id = displayItems[newIndex].id
         selectedItemID = id
-        proxy?.scrollTo(id)
+        selectedDisplayIndex = newIndex
+
+        let shouldScroll: Bool
+        if newIndex == 0 || newIndex == displayItems.count - 1 {
+            shouldScroll = true
+        } else if let lastKeyboardScrollIndex {
+            shouldScroll = abs(newIndex - lastKeyboardScrollIndex) >= 8
+        } else {
+            shouldScroll = true
+        }
+
+        if shouldScroll {
+            lastKeyboardScrollIndex = newIndex
+            proxy?.scrollTo(id)
+        }
+    }
+
+    private func refreshSelectedDisplayIndex() {
+        guard let selectedItemID else {
+            selectedDisplayIndex = nil
+            lastKeyboardScrollIndex = nil
+            return
+        }
+        selectedDisplayIndex = displayItems.firstIndex { $0.id == selectedItemID }
+        lastKeyboardScrollIndex = selectedDisplayIndex
+    }
+
+    private func clickOverlay(for item: Item) -> some View {
+        PrimaryClickOverlay {
+            selectItemFromPointer(item)
+        } onDoubleClick: {
+            openItem(item)
+        }
+    }
+
+    private func selectItemFromPointer(_ item: Item) {
+        if selectedItemID != item.id {
+            selectedItemID = item.id
+            selectedDisplayIndex = displayItems.firstIndex { $0.id == item.id }
+            lastKeyboardScrollIndex = selectedDisplayIndex
+        } else if selectedDisplayIndex == nil {
+            selectedDisplayIndex = displayItems.firstIndex { $0.id == item.id }
+            lastKeyboardScrollIndex = selectedDisplayIndex
+        }
+        if !mainContentHasFocus {
+            mainContentHasFocus = true
+        }
+    }
+
+private struct PrimaryClickOverlay: NSViewRepresentable {
+        let onPrimaryClick: () -> Void
+        let onDoubleClick: () -> Void
+
+        func makeNSView(context: Context) -> ClickView {
+            let view = ClickView()
+            view.onPrimaryClick = onPrimaryClick
+            view.onDoubleClick = onDoubleClick
+            return view
+        }
+
+        func updateNSView(_ nsView: ClickView, context: Context) {
+            nsView.onPrimaryClick = onPrimaryClick
+            nsView.onDoubleClick = onDoubleClick
+        }
+
+        final class ClickView: NSView {
+            var onPrimaryClick: (() -> Void)?
+            var onDoubleClick: (() -> Void)?
+
+            override var acceptsFirstResponder: Bool { true }
+
+            override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+                true
+            }
+
+            override func hitTest(_ point: NSPoint) -> NSView? {
+                guard let event = window?.currentEvent else {
+                    return super.hitTest(point)
+                }
+                switch event.type {
+                case .leftMouseDown:
+                    return super.hitTest(point)
+                default:
+                    return nil
+                }
+            }
+
+            override func mouseDown(with event: NSEvent) {
+                onPrimaryClick?()
+                if event.clickCount >= 2 {
+                    onDoubleClick?()
+                }
+            }
+        }
+    }
+
+    private struct SplitViewAutosave: NSViewRepresentable {
+        let name: String
+
+        func makeNSView(context: Context) -> AutosaveHostView {
+            let view = AutosaveHostView()
+            view.autosaveName = name
+            return view
+        }
+
+        func updateNSView(_ nsView: AutosaveHostView, context: Context) {
+            nsView.autosaveName = name
+            nsView.installAutosaveName()
+        }
+
+        final class AutosaveHostView: NSView {
+            var autosaveName = ""
+
+            override func viewDidMoveToSuperview() {
+                super.viewDidMoveToSuperview()
+                installAutosaveName()
+            }
+
+            override func viewDidMoveToWindow() {
+                super.viewDidMoveToWindow()
+                installAutosaveName()
+            }
+
+            func installAutosaveName() {
+                guard !autosaveName.isEmpty else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          let splitView = self.enclosingSplitView() else {
+                        return
+                    }
+                    splitView.autosaveName = NSSplitView.AutosaveName(self.autosaveName)
+                }
+            }
+
+            private func enclosingSplitView() -> NSSplitView? {
+                var view = superview
+                while let current = view {
+                    if let splitView = current as? NSSplitView {
+                        return splitView
+                    }
+                    view = current.superview
+                }
+                return nil
+            }
+        }
     }
 
     /// Toggles direction when re-selecting the current key, else switches key.
@@ -1330,12 +1947,11 @@ struct ContentView: View {
             for url in urls {
                 defer { dropQueueRemaining -= 1 }
 
-                let isZip = url.pathExtension.lowercased() == "zip"
                 var isDir: ObjCBool = false
                 let fileExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-                guard fileExists && (isZip || isDir.boolValue) else { continue }
+                guard fileExists, let kind = droppedFileKind(for: url, isDirectory: isDir.boolValue) else { continue }
 
-                if let id = addDroppedFile(url: url, isZipFile: isZip) {
+                if let id = addDroppedFile(url: url, kind: kind) {
                     lastAddedID = id
                 }
                 // Yield so the UI (progress counter) stays responsive
@@ -1346,12 +1962,29 @@ struct ContentView: View {
             if let lastAddedID {
                 selectedItemID = lastAddedID
             }
+            displayItems = computeFilteredItems()
+            refreshSelectedDisplayIndex()
         }
+    }
+
+    private func droppedFileKind(for url: URL, isDirectory: Bool) -> DroppedFileKind? {
+        if isDirectory { return .folder }
+
+        let ext = url.pathExtension.lowercased()
+        if ["zip", "rar", "7z"].contains(ext), ext == "zip" || helperExtensionIsRegistered(ext) {
+            return .pageCountedArchive
+        }
+
+        if helperExtensionIsRegistered(ext) {
+            return .helperFile
+        }
+
+        return nil
     }
 
     /// Registers a single dropped file. Returns the Item id if newly added.
     @discardableResult
-    private func addDroppedFile(url: URL, isZipFile: Bool) -> UUID? {
+    private func addDroppedFile(url: URL, kind: DroppedFileKind) -> UUID? {
         let (volumePath, volumeName, relativePath) = PathParser.split(url.path)
 
         // Prevent duplicate (Merge logic). Re-dropping an existing item also
@@ -1359,6 +1992,7 @@ struct ContentView: View {
         let fetchDescriptor = FetchDescriptor<Item>(predicate: #Predicate { $0.relativePath == relativePath })
         if let existing = try? modelContext.fetch(fetchDescriptor).first {
             existing.bookmarkData = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            addToCurrentStaticShelfIfNeeded(existing)
             return existing.id
         }
 
@@ -1379,8 +2013,12 @@ struct ContentView: View {
         let itemBookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
 
         // Parse 「(ジャンル)[作者名]タイトル」 from the file name
-        let parsed = FileNameParser.parse(fileName: url.lastPathComponent)
+        let parsed = FileNameParser.parse(fileName: url.lastPathComponent, format: customRenameFormat)
         let title = parsed.title.isEmpty ? url.deletingPathExtension().lastPathComponent : parsed.title
+        let pageCount = kind.shouldUsePageCountForBookType ? ItemFileAccess.listPages(at: url).count : 0
+        let parsedBookType = bookTypeIndex(for: parsed.type)
+        let autoBookType = kind.shouldUsePageCountForBookType ? BookTypeAutoClassifier.classify(pageCount: pageCount) : nil
+        let selectedBookType = parsedBookType ?? autoBookType ?? (kind == .helperFile ? 5 : 0)
 
         let newItem = Item(
             id: UUID(),
@@ -1390,12 +2028,53 @@ struct ContentView: View {
             title: title,
             author: parsed.author,
             genre: parsed.genre,
-            bookType: isZipFile ? 0 : 3,
-            fileType: isZipFile ? 2 : 1
+            relation: parsed.relation,
+            keywordA: parsed.keywordA,
+            keywordB: parsed.keywordB,
+            pages: pageCount,
+            bookType: selectedBookType,
+            fileType: kind.fileType
         )
 
         modelContext.insert(newItem)
+        addToCurrentStaticShelfIfNeeded(newItem)
         return newItem.id
+    }
+
+    /// If the user is currently viewing a normal shelf, a dropped file should
+    /// be registered in the library and added to that shelf. Smart shelves are
+    /// condition-based, so they remain automatic and are not manually mutated.
+    private func addToCurrentStaticShelfIfNeeded(_ item: Item) {
+        guard case .shelf(let shelfID) = sidebarSelection,
+              let shelf = shelves.first(where: { $0.id == shelfID && $0.type == 0 }) else {
+            return
+        }
+
+        var shelfItems = shelf.items ?? []
+        guard !shelfItems.contains(where: { $0.id == item.id }) else { return }
+        shelfItems.append(item)
+        shelf.items = shelfItems
+    }
+
+    private func bookTypeIndex(for parsedType: String) -> Int? {
+        let trimmed = parsedType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return typeNames.firstIndex { $0.localizedCaseInsensitiveCompare(trimmed) == .orderedSame }
+    }
+
+    private func runMaintenanceAction(_ action: MaintenanceAction) {
+        switch action {
+        case .manageVolumes:
+            showVolumeManager = true
+        case .importXMLLibrary:
+            importXMLLibrary()
+        case .migrateLegacyThumbnails:
+            migrateLegacyThumbnails()
+        case .repairThumbnails:
+            repairThumbnails()
+        case .repairEmptyTitles:
+            repairEmptyTitles()
+        }
     }
 
     // MARK: - Library Import & Merge Action with Progress Tracking
@@ -1547,50 +2226,39 @@ struct ContentView: View {
 
         Task {
             let cacheDir = ThumbnailCache.diskCacheDirectory
-            var suspects = 0
+            let scanResult = await Task.detached(priority: .userInitiated) {
+                await Self.scanThumbnailRepairTargets(itemIDs: items.map(\.id), cacheDir: cacheDir)
+            }.value
+
+            let suspectIDs = Set(scanResult.itemIDs)
+            let suspectItems = items.filter { suspectIDs.contains($0.id) }
+            let monochromeSuspects = scanResult.monochromeCount
+            let landscapeSuspects = scanResult.landscapeCount
             var repaired = 0
             var failed = 0
+            totalBooks = suspectItems.count
+            processedBooks = 0
 
-            for (index, item) in items.enumerated() {
-                if index % 50 == 0 {
+            for (index, item) in suspectItems.enumerated() {
+                if index % 10 == 0 {
                     processedBooks = index
                 }
 
-                let thumbURL = cacheDir.appendingPathComponent("\(item.id.uuidString).jpg")
-
-                // 1. Cheap dimension check (no decode) off the main thread
-                let isLandscape = await Task.detached(priority: .utility) {
-                    guard let size = CoverSelector.imagePixelSize(at: thumbURL) else { return false }
-                    return size.width > size.height
-                }.value
-                guard isLandscape else { continue }
-                suspects += 1
-
-                // 2. Re-extract the cover with the sequence heuristic
+                // Re-extract using the repair rule:
+                // sequence-first image; if it is monochrome, first portrait
+                // non-monochrome image in name order.
                 guard let resolved = ItemFileAccess.resolve(item: item) else {
                     failed += 1
                     continue
                 }
                 let bookURL = resolved.url
-                let candidates = await Task.detached(priority: .utility) {
-                    CoverSelector.orderedCoverCandidates(from: ItemFileAccess.listPages(at: bookURL))
+                let coverData = await Task.detached(priority: .utility) {
+                    Self.repairCoverData(bookURL: bookURL)
                 }.value
-
-                // Try candidates until one decodes (corrupt image fallback)
-                var succeeded = false
-                for candidate in candidates {
-                    let coverData = await Task.detached(priority: .utility) {
-                        ItemFileAccess.loadPageData(bookURL: bookURL, page: candidate)
-                    }.value
-                    if let coverData,
-                       await ThumbnailCache.shared.setCustomCover(forItemID: item.id, imageData: coverData) != nil {
-                        succeeded = true
-                        break
-                    }
-                }
                 resolved.release()
 
-                if succeeded {
+                if let coverData,
+                   await ThumbnailCache.shared.setCustomCover(forItemID: item.id, imageData: coverData) != nil {
                     repaired += 1
                 } else {
                     failed += 1
@@ -1598,15 +2266,72 @@ struct ContentView: View {
             }
 
             isImporting = false
-            importMessage = "サムネイルの一括修正が完了しました。\n\n・横長（ゴミ画像疑い）: \(suspects)件\n・修正済み: \(repaired)件\n・修正できず（未接続など）: \(failed)件"
+            processedBooks = totalBooks
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・モノクロ: \(monochromeSuspects)件\n・横長（ゴミ画像疑い）: \(landscapeSuspects)件\n・生成済み: \(repaired)件\n・生成できず（未接続など）: \(failed)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
     }
 
-    /// Fills empty display titles by parsing the file name with the
-    /// 「(ジャンル)[作者名]タイトル.zip」 naming convention. Also fills empty
-    /// author/genre fields from the same parse.
+    nonisolated private static func scanThumbnailRepairTargets(itemIDs: [UUID], cacheDir: URL) async -> ThumbnailRepairScanResult {
+        guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
+
+        let workerCount = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let chunkSize = max(100, itemIDs.count / max(1, workerCount * 2))
+
+        return await withTaskGroup(of: ThumbnailRepairScanResult.self) { group in
+            for start in stride(from: 0, to: itemIDs.count, by: chunkSize) {
+                let end = min(start + chunkSize, itemIDs.count)
+                let chunk = Array(itemIDs[start..<end])
+                group.addTask(priority: .utility) {
+                    var result = ThumbnailRepairScanResult()
+                    for itemID in chunk {
+                        let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
+                        guard let reasons = thumbnailRepairReasons(at: thumbURL) else { continue }
+                        result.itemIDs.append(itemID)
+                        if reasons.isMonochrome {
+                            result.monochromeCount += 1
+                        }
+                        if reasons.isLandscape {
+                            result.landscapeCount += 1
+                        }
+                    }
+                    return result
+                }
+            }
+
+            var merged = ThumbnailRepairScanResult()
+            for await result in group {
+                merged = merged.merged(with: result)
+            }
+            return merged
+        }
+    }
+
+    nonisolated private static func thumbnailRepairReasons(at thumbURL: URL) -> (isMonochrome: Bool, isLandscape: Bool)? {
+        guard FileManager.default.fileExists(atPath: thumbURL.path),
+              let size = CoverSelector.imagePixelSize(at: thumbURL) else {
+            return nil
+        }
+
+        if size.width > size.height {
+            return (isMonochrome: false, isLandscape: true)
+        }
+
+        if CoverSelector.imageIsMonochrome(at: thumbURL) {
+            return (isMonochrome: true, isLandscape: false)
+        }
+
+        return nil
+    }
+
+    nonisolated private static func repairCoverData(bookURL: URL) -> Data? {
+        CoverSelector.preferredCoverData(bookURL: bookURL)
+    }
+
+    /// Fills empty display metadata by parsing the file name with the
+    /// customizable format. Falls back to the classic
+    /// 「(ジャンル)[作者名]タイトル.zip」 naming convention.
     private func repairEmptyTitles() {
         var updated = 0
 
@@ -1614,7 +2339,7 @@ struct ContentView: View {
             guard item.title.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
 
             let fileName = (item.relativePath as NSString).lastPathComponent
-            let parsed = FileNameParser.parse(fileName: fileName)
+            let parsed = FileNameParser.parse(fileName: fileName, format: customRenameFormat)
 
             // Never leave the title empty: fall back to the bare file name
             let newTitle = parsed.title.isEmpty
@@ -1625,6 +2350,12 @@ struct ContentView: View {
             item.title = newTitle
             if item.author.isEmpty { item.author = parsed.author }
             if item.genre.isEmpty { item.genre = parsed.genre }
+            if item.relation.isEmpty { item.relation = parsed.relation }
+            if item.keywordA.isEmpty { item.keywordA = parsed.keywordA }
+            if item.keywordB.isEmpty { item.keywordB = parsed.keywordB }
+            if let parsedBookType = bookTypeIndex(for: parsed.type) {
+                item.bookType = parsedBookType
+            }
             updated += 1
         }
 
@@ -1827,11 +2558,60 @@ struct ContentView: View {
     }
 
     private func deleteShelf(_ shelf: Shelf) {
+        let type = shelf.type
         if case .shelf(let id) = sidebarSelection, id == shelf.id {
             sidebarSelection = .allBooks
         }
         modelContext.delete(shelf)
         try? modelContext.save()
+        normalizeShelfOrder(type: type)
+    }
+
+    private func reorderShelfByDrag(sourceID: UUID, targetID: UUID, type: Int) {
+        var orderIDs = shelfOrderIDs(type: type)
+        if orderIDs.isEmpty {
+            orderIDs = orderedShelves(type: type).map(\.id)
+        }
+
+        guard let sourceIndex = orderIDs.firstIndex(of: sourceID),
+              let targetIndex = orderIDs.firstIndex(of: targetID),
+              sourceIndex != targetIndex else {
+            return
+        }
+
+        let movedShelfID = orderIDs.remove(at: sourceIndex)
+        orderIDs.insert(movedShelfID, at: targetIndex)
+
+        if type == 0 {
+            staticShelfOrderIDs = orderIDs
+        } else {
+            smartShelfOrderIDs = orderIDs
+        }
+    }
+
+    private func commitShelfDrag(type: Int) {
+        let orderIDs = shelfOrderIDs(type: type)
+        let byID = Dictionary(uniqueKeysWithValues: shelves.filter { $0.type == type }.map { ($0.id, $0) })
+        let ordered = orderIDs.compactMap { byID[$0] }
+        guard !ordered.isEmpty else { return }
+        applyShelfOrder(ordered)
+    }
+
+    private func normalizeShelfOrder(type: Int) {
+        applyShelfOrder(orderedShelves(type: type))
+    }
+
+    private func applyShelfOrder(_ ordered: [Shelf]) {
+        for (index, shelf) in ordered.enumerated() {
+            shelf.sortOrder = index * 10
+        }
+        try? modelContext.save()
+    }
+
+    private func nextShelfSortOrder(type: Int) -> Int {
+        let existing = orderedShelves(type: type)
+        guard let last = existing.last else { return 0 }
+        return last.sortOrder + 10
     }
 
     /// Starts a slideshow for the item (toolbar スライドショー button) by
@@ -1969,12 +2749,31 @@ struct ContentView: View {
         let appLines = helperApplicationsList.components(separatedBy: "\n")
 
         for (idx, line) in extLines.enumerated() {
-            let exts = line.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-            if exts.contains(ext), idx < appLines.count {
+            if helperExtensions(in: line).contains(normalizedExtension(ext)), idx < appLines.count {
                 return helperAppURL(fullPath: appLines[idx], name: appLines[idx])
             }
         }
         return nil
+    }
+
+    private func helperExtensionIsRegistered(_ ext: String) -> Bool {
+        let normalized = normalizedExtension(ext)
+        guard !normalized.isEmpty else { return false }
+        return helperExtensionsList
+            .components(separatedBy: "\n")
+            .contains { helperExtensions(in: $0).contains(normalized) }
+    }
+
+    private func helperExtensions(in line: String) -> [String] {
+        line.components(separatedBy: ",")
+            .map { normalizedExtension($0) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func normalizedExtension(_ ext: String) -> String {
+        ext.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            .lowercased()
     }
 
     /// Resolves a helper app reference (full path preferred, plain app name as fallback).
@@ -2001,7 +2800,7 @@ struct ContentView: View {
     }
 
     private func createStaticShelf() {
-        let newShelf = Shelf(title: "新規シェルフ", icon: 0, type: 0)
+        let newShelf = Shelf(title: "新規シェルフ", icon: 0, type: 0, sortOrder: nextShelfSortOrder(type: 0))
         modelContext.insert(newShelf)
         try? modelContext.save()
     }
@@ -2030,16 +2829,5 @@ struct ContentView: View {
         }
         .padding(24)
         .frame(width: 360, height: 260)
-    }
-}
-
-// MARK: - Retro horizontal radio grouping support
-extension View {
-    func horizontalRadioGrouping() -> some View {
-        #if os(macOS)
-        return self.pickerStyle(.radioGroup)
-        #else
-        return self
-        #endif
     }
 }

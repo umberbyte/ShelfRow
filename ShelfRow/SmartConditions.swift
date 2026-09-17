@@ -47,6 +47,123 @@ enum BookTypeInfo {
     }
 }
 
+enum KeywordEquivalenceField: String, CaseIterable, Codable, Identifiable {
+    case author
+    case genre
+    case relation
+    case keywordA
+    case keywordB
+    case memo
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .author: return "作者"
+        case .genre: return "ジャンル"
+        case .relation: return "関連"
+        case .keywordA: return "キーワードA"
+        case .keywordB: return "キーワードB"
+        case .memo: return "メモ"
+        }
+    }
+
+    func value(in item: Item) -> String {
+        switch self {
+        case .author: return item.author
+        case .genre: return item.genre
+        case .relation: return item.relation
+        case .keywordA: return item.keywordA
+        case .keywordB: return item.keywordB
+        case .memo: return item.memo
+        }
+    }
+}
+
+struct KeywordEquivalenceRule: Codable, Equatable, Identifiable {
+    var id: UUID = UUID()
+    var field: KeywordEquivalenceField = .keywordA
+    var terms: [String] = []
+}
+
+enum KeywordEquivalenceCodec {
+    nonisolated static func decode(_ json: String) -> [KeywordEquivalenceRule] {
+        guard let data = json.data(using: .utf8),
+              let rules = try? JSONDecoder().decode([KeywordEquivalenceRule].self, from: data) else {
+            return []
+        }
+        return rules.filter { !normalizedTerms($0.terms).isEmpty }
+    }
+
+    nonisolated static func encode(_ rules: [KeywordEquivalenceRule]) -> String {
+        let cleaned = rules
+            .map { rule in
+                var rule = rule
+                rule.terms = cleanedTerms(rule.terms)
+                return rule
+            }
+            .filter { !$0.terms.isEmpty }
+        guard let data = try? JSONEncoder().encode(cleaned),
+              let json = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return json
+    }
+
+    nonisolated static func terms(from text: String) -> [String] {
+        cleanedTerms(
+            text
+                .components(separatedBy: CharacterSet(charactersIn: ",、\n\t"))
+                .flatMap { $0.components(separatedBy: " / ") }
+        )
+    }
+
+    nonisolated static func termsText(_ terms: [String]) -> String {
+        cleanedTerms(terms).joined(separator: ", ")
+    }
+
+    nonisolated static func searchTerms(for query: String, rules: [KeywordEquivalenceRule]) -> [KeywordEquivalenceField: [String]] {
+        let normalizedQuery = normalize(query)
+        guard !normalizedQuery.isEmpty else { return [:] }
+
+        var result: [KeywordEquivalenceField: Set<String>] = [:]
+        for rule in rules {
+            let terms = normalizedTerms(rule.terms)
+            guard terms.contains(where: { normalizedQuery.contains($0) || $0.contains(normalizedQuery) }) else {
+                continue
+            }
+            for term in rule.terms {
+                result[rule.field, default: []].insert(term)
+            }
+        }
+        return result.mapValues { Array($0) }
+    }
+
+    nonisolated static func normalize(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+    }
+
+    nonisolated private static func cleanedTerms(_ terms: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for term in terms {
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalized = normalize(trimmed)
+            guard !normalized.isEmpty, !seen.contains(normalized) else { continue }
+            seen.insert(normalized)
+            result.append(trimmed)
+        }
+        return result
+    }
+
+    nonisolated private static func normalizedTerms(_ terms: [String]) -> [String] {
+        terms.map(normalize).filter { !$0.isEmpty }
+    }
+}
+
 /// Decoded smart shelf filter conditions.
 /// Serialized into `Shelf.smartConditionsJson` using the same top-level keys
 /// as the legacy Stackroom XML ("Keyword Condition", "Date Condition", ...)

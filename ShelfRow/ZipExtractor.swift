@@ -24,6 +24,18 @@ nonisolated struct ZipExtractor {
         let localHeaderOffset: UInt64
     }
 
+    private final class EntryCacheBox {
+        let signature: String
+        let entries: [Entry]
+
+        init(signature: String, entries: [Entry]) {
+            self.signature = signature
+            self.entries = entries
+        }
+    }
+
+    private static let entryCache = NSCache<NSString, EntryCacheBox>()
+
     // MARK: - Public API
 
     /// Lists all file paths inside a ZIP archive (directories excluded).
@@ -44,6 +56,14 @@ nonisolated struct ZipExtractor {
     // MARK: - Central directory parsing
 
     private static func readEntries(at url: URL) -> [Entry] {
+        let cacheKey = url.path as NSString
+        let currentSignature = archiveSignature(for: url)
+        if let currentSignature,
+           let cached = entryCache.object(forKey: cacheKey),
+           cached.signature == currentSignature {
+            return cached.entries
+        }
+
         guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
         guard let fileSize = try? handle.seekToEnd(), fileSize >= 22 else { return [] }
@@ -137,7 +157,19 @@ nonisolated struct ZipExtractor {
             ))
             p += 46 + nameLength + extraLength + commentLength
         }
+        if let currentSignature {
+            entryCache.setObject(EntryCacheBox(signature: currentSignature, entries: entries), forKey: cacheKey)
+        }
         return entries
+    }
+
+    private static func archiveSignature(for url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let fileSize = values.fileSize else {
+            return nil
+        }
+        let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(fileSize)-\(modified)"
     }
 
     // MARK: - Entry extraction

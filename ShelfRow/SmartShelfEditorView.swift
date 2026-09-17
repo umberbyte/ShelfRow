@@ -9,32 +9,32 @@ import SwiftUI
 import SwiftData
 
 /// Faithful recreation of the classic Stackroom "新規スマートシェルフ" dialog:
-/// name + folder icon, キーワード / 日時 / 種類 / レート / 未読 condition rows.
+/// name, キーワード / 日時 / 種類 / レート / 未読 condition rows.
 struct SmartShelfEditorView: View {
     @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Shelf.sortOrder) private var shelves: [Shelf]
     @Binding var isPresented: Bool
 
     /// When non-nil the dialog edits an existing smart shelf.
     var editingShelf: Shelf? = nil
 
     // Customized field labels (Customize settings tab)
-    @AppStorage("fieldNameAuthor") private var fieldAuthor = "作者"
-    @AppStorage("fieldNameGenre") private var fieldGenre = "ジャンル"
-    @AppStorage("fieldNameRelation") private var fieldRelation = "関連"
-    @AppStorage("fieldNameKeywordA") private var fieldKeywordA = "キーワードA"
-    @AppStorage("fieldNameKeywordB") private var fieldKeywordB = "キーワードB"
+    @AppStorage("fieldNameAuthor") private var fieldAuthor = ""
+    @AppStorage("fieldNameGenre") private var fieldGenre = ""
+    @AppStorage("fieldNameRelation") private var fieldRelation = ""
+    @AppStorage("fieldNameKeywordA") private var fieldKeywordA = ""
+    @AppStorage("fieldNameKeywordB") private var fieldKeywordB = ""
 
     // Customized type labels
-    @AppStorage("typeNameThickBook") private var thickBook = "厚い本"
-    @AppStorage("typeNameThinBook") private var thinBook = "薄い本"
-    @AppStorage("typeNamePartBook") private var partBook = "本の一部"
-    @AppStorage("typeNameImageSet") private var imageSet = "画像セット"
-    @AppStorage("typeNameText") private var textType = "テキスト"
-    @AppStorage("typeNameMovie") private var movieType = "ムービー"
+    @AppStorage("typeNameThickBook") private var thickBook = ""
+    @AppStorage("typeNameThinBook") private var thinBook = ""
+    @AppStorage("typeNamePartBook") private var partBook = ""
+    @AppStorage("typeNameImageSet") private var imageSet = ""
+    @AppStorage("typeNameText") private var textType = ""
+    @AppStorage("typeNameMovie") private var movieType = ""
 
     // Dialog state
     @State private var name = "新規スマートシェルフ"
-    @State private var icon = 0
 
     @State private var keywordEnabled = false
     @State private var keywordField = "Title"
@@ -57,16 +57,21 @@ struct SmartShelfEditorView: View {
 
     private var keywordFieldChoices: [(String, String)] {
         [("Title", "タイトル"),
-         ("Author", fieldAuthor),
-         ("Genre", fieldGenre),
-         ("Relation", fieldRelation),
-         ("Keyword A", fieldKeywordA),
-         ("Keyword B", fieldKeywordB),
+         ("Author", customName(fieldAuthor, default: "作者")),
+         ("Relation", customName(fieldRelation, default: "関連")),
+         ("Genre", customName(fieldGenre, default: "ジャンル")),
+         ("Keyword A", customName(fieldKeywordA, default: "キーワードA")),
+         ("Keyword B", customName(fieldKeywordB, default: "キーワードB")),
          ("Neta", "メモ")]
     }
 
     private var typeNames: [String] {
-        [thickBook, thinBook, partBook, imageSet, textType, movieType]
+        [customName(thickBook, default: "厚い本"),
+         customName(thinBook, default: "薄い本"),
+         customName(partBook, default: "本の一部"),
+         customName(imageSet, default: "画像セット"),
+         customName(textType, default: "テキスト"),
+         customName(movieType, default: "ムービー")]
     }
 
     var body: some View {
@@ -80,24 +85,13 @@ struct SmartShelfEditorView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 14) {
-                // 名前 + アイコン
+                // 名前
                 HStack(spacing: 8) {
                     Text("名前:")
                         .frame(width: 60, alignment: .trailing)
                     TextField("", text: $name)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
-
-                    // Folder icon selector (classic colored folder popup)
-                    Picker("", selection: $icon) {
-                        ForEach(0..<7, id: \.self) { idx in
-                            Image(systemName: "folder.fill")
-                                .foregroundColor(BookTypeInfo.folderColor(forIcon: idx))
-                                .tag(idx)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 60)
                     Spacer()
                 }
                 .padding(.top, 6)
@@ -120,12 +114,12 @@ struct SmartShelfEditorView: View {
                             .frame(minWidth: 120)
 
                         Picker("", selection: $keywordMode) {
-                            Text("の項目").tag(0)
-                            Text("でない項目").tag(1)
-                            Text("と一致する項目").tag(2)
+                            Text("完全一致").tag(2)
+                            Text("キーワードと一致").tag(0)
+                            Text("キーワードを含まない").tag(1)
                         }
                         .labelsHidden()
-                        .frame(width: 130)
+                        .frame(width: 160)
                     }
                     .disabled(!keywordEnabled)
                 }
@@ -311,7 +305,6 @@ struct SmartShelfEditorView: View {
     private func loadFromShelf() {
         guard let shelf = editingShelf else { return }
         name = shelf.title
-        icon = shelf.icon
 
         let conditions = SmartConditionsCodec.decode(shelf.smartConditionsJson)
         if let keyword = conditions.keyword {
@@ -360,13 +353,18 @@ struct SmartShelfEditorView: View {
 
         if let shelf = editingShelf {
             shelf.title = name
-            shelf.icon = icon
             shelf.smartConditionsJson = json
         } else {
-            let shelf = Shelf(title: name, icon: icon, type: 1, smartConditionsJson: json)
+            let shelf = Shelf(title: name, icon: 0, type: 1, sortOrder: nextSmartShelfSortOrder(), smartConditionsJson: json)
             modelContext.insert(shelf)
         }
         try? modelContext.save()
         isPresented = false
+    }
+
+    private func nextSmartShelfSortOrder() -> Int {
+        let smartShelves = shelves.filter { $0.type == 1 }
+        guard let last = smartShelves.max(by: { $0.sortOrder < $1.sortOrder }) else { return 0 }
+        return last.sortOrder + 10
     }
 }

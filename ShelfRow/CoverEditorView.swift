@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import ImageIO
 
 extension Notification.Name {
     /// Posted (with the item UUID as object) when a cover thumbnail is replaced.
@@ -162,7 +163,7 @@ struct CoverEditorView: View {
 
         Task.detached(priority: .userInitiated) {
             let data = ItemFileAccess.loadPageData(bookURL: bookURL, page: page)
-            let image = data.flatMap { NSImage(data: $0) }
+            let image = data.flatMap { Self.previewImage(from: $0) }
             await MainActor.run {
                 guard self.pages.indices.contains(self.currentIndex),
                       self.pages[self.currentIndex] == page else { return }
@@ -190,5 +191,21 @@ struct CoverEditorView: View {
             isSaving = false
             isPresented = false
         }
+    }
+
+    nonisolated private static func previewImage(from data: Data, maxPixelSize: Int = 900) -> NSImage? {
+        guard CoverSelector.imageDataLooksComplete(data) else { return nil }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cgImage, size: .zero)
     }
 }

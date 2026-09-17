@@ -56,18 +56,27 @@ struct CoverImageView: View {
         // Reload when the cover is replaced (表紙を編集) or after bulk
         // thumbnail migration (object == nil means "all covers changed").
         .onReceive(NotificationCenter.default.publisher(for: .coverDidChange)) { notification in
-            if notification.object == nil || (notification.object as? UUID) == item.id {
-                Task { await loadImage() }
+            if (notification.object as? UUID) == item.id {
+                Task {
+                    await ThumbnailCache.shared.invalidateFailure(forItemID: item.id)
+                    await loadImage()
+                }
+            } else if notification.object == nil, image == nil {
+                Task {
+                    await ThumbnailCache.shared.invalidateFailure(forItemID: nil)
+                    await loadImage()
+                }
             }
         }
     }
     
     private func loadImage() async {
+        if isLoading { return }
         isLoading = true
         image = nil
-        
+
         let loadedImage = await ThumbnailCache.shared.getCoverImage(for: item)
-        
+
         await MainActor.run {
             self.image = loadedImage
             self.isLoading = false
