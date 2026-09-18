@@ -233,7 +233,8 @@ struct ShelfRowTests {
 
         let reasons = try #require(ContentView.thumbnailRepairReasons(
             at: directory.appendingPathComponent("absent.jpg"),
-            alreadyGenerated: false
+            alreadyGenerated: false,
+            knownToHaveNoCover: false
         ))
 
         #expect(reasons.isMissing)
@@ -248,7 +249,8 @@ struct ShelfRowTests {
 
         let reasons = try #require(ContentView.thumbnailRepairReasons(
             at: directory.appendingPathComponent("absent.jpg"),
-            alreadyGenerated: true
+            alreadyGenerated: true,
+            knownToHaveNoCover: false
         ))
 
         #expect(reasons.isMissing)
@@ -262,7 +264,7 @@ struct ShelfRowTests {
         let thumbURL = directory.appendingPathComponent("truncated.jpg")
         try Data().write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false))
 
         #expect(reasons.isMissing)
     }
@@ -276,10 +278,24 @@ struct ShelfRowTests {
         try makeTestImage(width: 80, height: 40, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
             .write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false))
 
         #expect(reasons.isLandscape)
         #expect(!reasons.isMissing)
+    }
+
+    @Test func bulkGenerationStopsRetryingABookWithNoUsableCover() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // Opening the book produced no thumbnail, so there is no file — but the
+        // reason is inside the book, and a second run would find the same thing.
+        #expect(ContentView.thumbnailRepairReasons(
+            at: directory.appendingPathComponent("absent.jpg"),
+            alreadyGenerated: false,
+            knownToHaveNoCover: true
+        ) == nil)
     }
 
     @Test func bulkGenerationLeavesACoverItAlreadyExtractedAlone() throws {
@@ -297,8 +313,8 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(gray: 0.5, alpha: 1), type: .png)
             .write(to: monochrome)
 
-        #expect(ContentView.thumbnailRepairReasons(at: spread, alreadyGenerated: true) == nil)
-        #expect(ContentView.thumbnailRepairReasons(at: monochrome, alreadyGenerated: true) == nil)
+        #expect(ContentView.thumbnailRepairReasons(at: spread, alreadyGenerated: true, knownToHaveNoCover: false) == nil)
+        #expect(ContentView.thumbnailRepairReasons(at: monochrome, alreadyGenerated: true, knownToHaveNoCover: false) == nil)
     }
 
     @Test func bulkGenerationRepicksAMonochromeThumbnailThatIsAlreadyOnDisk() throws {
@@ -310,7 +326,7 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(gray: 0.5, alpha: 1), type: .png)
             .write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false))
 
         #expect(reasons.isMonochrome)
         #expect(!reasons.isMissing)
@@ -325,7 +341,7 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
             .write(to: thumbURL)
 
-        #expect(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false) == nil)
+        #expect(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false) == nil)
     }
 
     @Test func coverPrefetchWindowIsEmptyWithoutNeighborsToLoad() {

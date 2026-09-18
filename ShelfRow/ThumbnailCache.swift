@@ -97,32 +97,48 @@ private let thumbnailMemoryStore = ThumbnailMemoryStore(
 /// re-create the directory on every read.
 private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
 
-/// Remembers which covers this app has already extracted with the current
-/// heuristic.
+/// What extracting a cover concluded, for the books where running it again would
+/// reach the same conclusion.
 ///
-/// Extraction is deterministic, so a book whose best page is a spread or a
-/// monochrome page produces a thumbnail that looks wrong by the very rules that
-/// asked for it. Without this record, every bulk run would pick those same books
-/// up again and re-read their archives to arrive at the same image.
-enum GeneratedCoverLog {
+/// Extraction is deterministic, so without this record a bulk pass keeps redoing
+/// its own work: a book whose best page really is a spread or a monochrome page
+/// produces a thumbnail that looks wrong by the very rules that asked for it, and
+/// a book with nothing usable inside produces no file at all, which reads as
+/// "not generated yet". Both would be re-read on every run, forever.
+///
+/// A book that simply could not be reached — volume unmounted, file moved — is
+/// deliberately not recorded: that answer can change by the next run.
+struct CoverExtractionLog: Codable, Sendable {
+    /// Books this app has extracted a thumbnail for.
+    var generated: Set<UUID> = []
+    /// Books that were reachable but hold no page usable as a cover.
+    var withoutCover: Set<UUID> = []
+
     private static var fileURL: URL {
-        thumbnailCacheDirectory.appendingPathComponent("generated-covers.json")
+        thumbnailCacheDirectory.appendingPathComponent("cover-extraction-log.json")
     }
 
-    static func load() -> Set<UUID> {
+    static func load() -> CoverExtractionLog {
         guard let data = try? Data(contentsOf: fileURL),
-              let itemIDs = try? JSONDecoder().decode([UUID].self, from: data) else {
-            return []
+              let log = try? JSONDecoder().decode(CoverExtractionLog.self, from: data) else {
+            return CoverExtractionLog()
         }
-        return Set(itemIDs)
+        return log
     }
 
-    static func add(_ itemIDs: [UUID]) {
-        guard !itemIDs.isEmpty else { return }
+    static func record(generated: [UUID], withoutCover: [UUID]) {
+        guard !generated.isEmpty || !withoutCover.isEmpty else { return }
 
-        var known = load()
-        known.formUnion(itemIDs)
-        guard let data = try? JSONEncoder().encode(Array(known)) else { return }
+        var log = load()
+        log.generated.formUnion(generated)
+        log.withoutCover.formUnion(withoutCover)
+
+        // A book that has a cover now is no longer one without a cover, and the
+        // other way round.
+        log.withoutCover.subtract(generated)
+        log.generated.subtract(withoutCover)
+
+        guard let data = try? JSONEncoder().encode(log) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
 }
@@ -250,7 +266,9 @@ final class ThumbnailCache {
     /// it to the disk cache. This is the expensive path — bookmark resolution, a
     /// read over the volume, and a decode plus re-encode — so it is nonisolated:
     /// callers run it on a background queue, and several can run at once.
-    nonisolated static func extractThumbnailToDiskCache(for request: ThumbnailRequest) -> NSImage? {
+    nonisolated static func extractThumbnailToDiskCache(
+        for request: ThumbnailRequest
+    ) -> (image: NSImage?, fileWasReachable: Bool) {
         var resolvedURL: URL? = nil
         var securityAnchor: URL? = nil
 
@@ -286,11 +304,17 @@ final class ThumbnailCache {
 
         defer { securityAnchor?.stopAccessingSecurityScopedResource() }
 
+        // Unreachable right now (volume unmounted, file moved) is a different
+        // answer from reachable-but-nothing-inside: only the second one will still
+        // be true the next time the library is scanned.
         guard let fileURL = resolvedURL,
-              FileManager.default.fileExists(atPath: fileURL.path),
-              let coverData = CoverSelector.preferredCoverData(bookURL: fileURL),
+              FileManager.default.fileExists(atPath: fileURL.path) else {
+            return (nil, false)
+        }
+
+        guard let coverData = CoverSelector.preferredCoverData(bookURL: fileURL),
               let thumbnail = createThumbnail(from: coverData) else {
-            return nil
+            return (nil, true)
         }
 
         let localThumbnailURL = thumbnailCacheDirectory
@@ -301,7 +325,7 @@ final class ThumbnailCache {
             try? jpegData.write(to: localThumbnailURL, options: .atomic)
         }
 
-        return thumbnail
+        return (thumbnail, true)
     }
 
     /// Generates covers for a whole batch of items, several at a time.
@@ -313,29 +337,32 @@ final class ThumbnailCache {
     nonisolated static func generateThumbnails(
         for requests: [ThumbnailRequest],
         progress: @escaping @MainActor (Int) -> Void
-    ) async -> (generated: [UUID], failed: Int) {
-        guard !requests.isEmpty else { return ([], 0) }
+    ) async -> (generated: [UUID], withoutCover: [UUID], unreachable: Int) {
+        guard !requests.isEmpty else { return ([], [], 0) }
 
         let width = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
         var generated: [UUID] = []
-        var failed = 0
+        var withoutCover: [UUID] = []
+        var unreachable = 0
         var completed = 0
 
-        await withTaskGroup(of: (UUID, Bool).self) { group in
+        await withTaskGroup(of: (itemID: UUID, succeeded: Bool, reachable: Bool).self) { group in
             var next = 0
             while next < min(width, requests.count) {
-                let request = requests[next]
-                group.addTask(priority: .utility) {
-                    (request.itemID, ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil)
+                group.addTask(priority: .utility) { [request = requests[next]] in
+                    let outcome = ThumbnailCache.extractThumbnailToDiskCache(for: request)
+                    return (request.itemID, outcome.image != nil, outcome.fileWasReachable)
                 }
                 next += 1
             }
 
-            while let (itemID, succeeded) = await group.next() {
-                if succeeded {
-                    generated.append(itemID)
+            while let result = await group.next() {
+                if result.succeeded {
+                    generated.append(result.itemID)
+                } else if result.reachable {
+                    withoutCover.append(result.itemID)
                 } else {
-                    failed += 1
+                    unreachable += 1
                 }
 
                 completed += 1
@@ -345,15 +372,15 @@ final class ThumbnailCache {
                 }
 
                 guard !Task.isCancelled, next < requests.count else { continue }
-                let request = requests[next]
-                group.addTask(priority: .utility) {
-                    (request.itemID, ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil)
+                group.addTask(priority: .utility) { [request = requests[next]] in
+                    let outcome = ThumbnailCache.extractThumbnailToDiskCache(for: request)
+                    return (request.itemID, outcome.image != nil, outcome.fileWasReachable)
                 }
                 next += 1
             }
         }
 
-        return (generated, failed)
+        return (generated, withoutCover, unreachable)
     }
 
     /// Scale down raw image data to a high-quality thumbnail using CGImageSource.
@@ -480,7 +507,7 @@ final class ThumbnailCache {
         // cover being decoded would stall the disk read for the cover on screen.
         let thumbnail: NSImage? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.extractThumbnailToDiskCache(for: request))
+                continuation.resume(returning: Self.extractThumbnailToDiskCache(for: request).image)
             }
         }
 
@@ -528,7 +555,7 @@ final class ThumbnailCache {
 
         // A cover the user picked by hand is settled: a later bulk pass must not
         // decide it looks like the wrong page and replace it.
-        GeneratedCoverLog.add([itemID])
+        CoverExtractionLog.record(generated: [itemID], withoutCover: [])
         return thumbnail
     }
 

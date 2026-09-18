@@ -2500,7 +2500,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 await Self.scanThumbnailRepairTargets(
                     itemIDs: itemIDs,
                     cacheDir: cacheDir,
-                    alreadyGeneratedIDs: GeneratedCoverLog.load()
+                    extractionLog: CoverExtractionLog.load()
                 )
             }.value
 
@@ -2519,11 +2519,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             }
 
             // Record what the current heuristic has now been run against, so a
-            // second pass does not re-read these archives to arrive at the same
-            // image. Items that failed are left out and will be retried.
+            // second pass does not re-read these archives to reach the same answer.
+            // Books that could not be opened at all are left out: that can change
+            // by the next run, so they stay on the list.
             let generatedIDs = outcome.generated
+            let withoutCoverIDs = outcome.withoutCover
             await Task.detached(priority: .utility) {
-                GeneratedCoverLog.add(generatedIDs)
+                CoverExtractionLog.record(generated: generatedIDs, withoutCover: withoutCoverIDs)
             }.value
 
             // Items whose cover failed to load earlier in the session are
@@ -2533,7 +2535,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
             isImporting = false
             processedBooks = totalBooks
-            importMessage = "サムネイルの一括生成が完了しました。\n\n・そのまま使用（スキップ）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated.count)件\n・生成できず（未接続など）: \(outcome.failed)件"
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・そのまま使用（スキップ）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated.count)件\n・使える表紙が無い: \(outcome.withoutCover.count)件\n・ファイルを開けず（未接続など）: \(outcome.unreachable)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
@@ -2542,7 +2544,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     nonisolated private static func scanThumbnailRepairTargets(
         itemIDs: [UUID],
         cacheDir: URL,
-        alreadyGeneratedIDs: Set<UUID>
+        extractionLog: CoverExtractionLog
     ) async -> ThumbnailRepairScanResult {
         guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
 
@@ -2559,7 +2561,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                         let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
                         guard let reasons = thumbnailRepairReasons(
                             at: thumbURL,
-                            alreadyGenerated: alreadyGeneratedIDs.contains(itemID)
+                            alreadyGenerated: extractionLog.generated.contains(itemID),
+                            knownToHaveNoCover: extractionLog.withoutCover.contains(itemID)
                         ) else { continue }
                         result.itemIDs.append(itemID)
                         if reasons.isMonochrome {
@@ -2596,15 +2599,18 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     /// either way.
     nonisolated static func thumbnailRepairReasons(
         at thumbURL: URL,
-        alreadyGenerated: Bool
+        alreadyGenerated: Bool,
+        knownToHaveNoCover: Bool
     ) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
         // Nothing there yet, an empty file from an interrupted write, or an image
-        // that cannot be read back: generate it.
+        // that cannot be read back: generate it — unless opening this book has
+        // already shown there is no page inside to use, which is why it has no
+        // thumbnail in the first place.
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: thumbURL.path),
               let byteSize = attributes[.size] as? Int,
               byteSize > 0,
               let size = CoverSelector.imagePixelSize(at: thumbURL) else {
-            return (isMonochrome: false, isLandscape: false, isMissing: true)
+            return knownToHaveNoCover ? nil : (isMonochrome: false, isLandscape: false, isMissing: true)
         }
 
         guard !alreadyGenerated else { return nil }
