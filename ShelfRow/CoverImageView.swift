@@ -86,8 +86,9 @@ struct CoverImageView: View {
         let request = ThumbnailRequest(item: item)
 
         // Thumbnails that are merely on disk still draw right away: reading one is
-        // cheap enough to keep up with the cursor.
-        if let rendered = await ThumbnailCache.shared.cachedCoverImage(for: request) {
+        // cheap enough to keep up with the cursor, and this path stays off the
+        // cache actor so prefetching cannot hold it up.
+        if let rendered = await ThumbnailCache.renderedCoverImage(for: request) {
             guard !Task.isCancelled else { return }
             image = rendered
             return

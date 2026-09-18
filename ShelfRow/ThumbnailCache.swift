@@ -80,6 +80,18 @@ private final class ThumbnailMemoryStore: @unchecked Sendable {
 /// Limited to 200 images to prevent RAM pressure on large libraries.
 private let thumbnailMemoryStore = ThumbnailMemoryStore(countLimit: 200)
 
+/// Resolved once: the disk tier runs outside the actor and would otherwise
+/// re-create the directory on every read.
+private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
+
+/// Reading an already-rendered thumbnail gets its own lane: serial, so a full
+/// grid of cells cannot spawn a thread each, and separate from the queue doing
+/// archive extraction, so a cheap read never waits behind an expensive one.
+private let thumbnailReadQueue = DispatchQueue(
+    label: "jp.aromatics.ShelfRow.thumbnail-read",
+    qos: .userInitiated
+)
+
 /// A highly-efficient, thread-safe asynchronous cache for cover images
 /// with in-memory NSCache and disk file caching.
 @ThumbnailCacheActor
@@ -90,7 +102,6 @@ final class ThumbnailCache {
     private var missingCoverKeys: Set<String> = []
     private var inFlightLoads: [UUID: Task<NSImage?, Never>] = [:]
     private var prefetchTask: Task<Void, Never>?
-    private let fileManager = FileManager.default
 
     /// Shared thumbnails disk-cache location (also used by the importer and
     /// the legacy thumbnail migration).
@@ -102,8 +113,6 @@ final class ThumbnailCache {
         return thumbs
     }
 
-    private let cacheDirectory: URL = ThumbnailCache.diskCacheDirectory
-
     private init() {}
 
     /// Synchronous peek at the memory tier, for callers that can draw the cover
@@ -112,9 +121,59 @@ final class ThumbnailCache {
         thumbnailMemoryStore.image(forKey: itemID.uuidString)
     }
 
+    /// Memory -> disk -> legacy Stackroom thumbnail, stopping short of extracting
+    /// the cover from the archive.
+    ///
+    /// Deliberately outside the actor: decoding a thumbnail costs real CPU, and on
+    /// the actor this read would queue behind whatever prefetching is decoding and
+    /// re-encoding — which is exactly when the cover on screen needs it.
+    nonisolated static func renderedCoverImage(for request: ThumbnailRequest) async -> NSImage? {
+        if let cached = cachedImage(forItemID: request.itemID) {
+            return cached
+        }
+
+        return await withCheckedContinuation { continuation in
+            thumbnailReadQueue.async {
+                continuation.resume(returning: renderedThumbnail(for: request))
+            }
+        }
+    }
+
+    /// The tiers that only read already-rendered thumbnails: the local disk cache
+    /// and the Stackroom library. Both are local files, so this keeps up with the
+    /// cursor as long as it is not serialized behind heavier work.
+    nonisolated static func renderedThumbnail(for request: ThumbnailRequest) -> NSImage? {
+        let cacheKeyString = request.itemID.uuidString
+        let fileManager = FileManager.default
+        let localThumbnailURL = thumbnailCacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
+
+        // Disk Cache check
+        if fileManager.fileExists(atPath: localThumbnailURL.path) {
+            if let image = loadCachedThumbnail(at: localThumbnailURL) {
+                thumbnailMemoryStore.store(image, forKey: cacheKeyString)
+                return image
+            }
+        }
+
+        // Legacy Stackroom Thumbnail Check (Instant reuse of pre-rendered assets)
+        if let legacyID = request.legacyID {
+            let legacyThumbPath = NSHomeDirectory() + "/Library/Application Support/Stackroom/Stackroom Library/\(legacyID)/thumbnail.jpg"
+            if fileManager.fileExists(atPath: legacyThumbPath) {
+                let legacyThumbURL = URL(fileURLWithPath: legacyThumbPath)
+                if let image = loadCachedThumbnail(at: legacyThumbURL) {
+                    thumbnailMemoryStore.store(image, forKey: cacheKeyString)
+                    try? fileManager.copyItem(atPath: legacyThumbPath, toPath: localThumbnailURL.path)
+                    return image
+                }
+            }
+        }
+
+        return nil
+    }
+
     /// Scale down raw image data to a high-quality thumbnail using CGImageSource.
     /// This is extremely memory-efficient as it does not load the full-res image into RAM.
-    private func createThumbnail(from data: Data, maxPixelSize: Int = 400) -> NSImage? {
+    nonisolated static func createThumbnail(from data: Data, maxPixelSize: Int = 400) -> NSImage? {
         guard CoverSelector.imageDataLooksComplete(data) else { return nil }
 
         let options: [CFString: Any] = [
@@ -136,7 +195,7 @@ final class ThumbnailCache {
     /// Loads an already-cached thumbnail eagerly. NSImage(contentsOf:) can defer
     /// decoding until drawing, which makes row selection feel like the cache miss
     /// happened on the main thread.
-    private func loadCachedThumbnail(at url: URL) -> NSImage? {
+    nonisolated static func loadCachedThumbnail(at url: URL) -> NSImage? {
         let sourceOptions: [CFString: Any] = [
             kCGImageSourceShouldCache: false
         ]
@@ -203,52 +262,10 @@ final class ThumbnailCache {
         }
     }
 
-    /// Memory -> disk -> legacy Stackroom thumbnail, stopping short of extracting
-    /// the cover from the archive. Callers that must stay responsive while the
-    /// cursor is moving use this to show what is already rendered without queueing
-    /// work on a slow volume.
-    func cachedCoverImage(for request: ThumbnailRequest) async -> NSImage? {
-        if let cachedImage = thumbnailMemoryStore.image(forKey: request.itemID.uuidString) {
-            return cachedImage
-        }
-        return renderedThumbnail(for: request)
-    }
-
-    /// The tiers that only read already-rendered thumbnails (local disk cache and
-    /// the Stackroom library), both cheap enough to run while scrolling.
-    private func renderedThumbnail(for request: ThumbnailRequest) -> NSImage? {
-        let cacheKeyString = request.itemID.uuidString
-        let localThumbnailURL = cacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
-
-        // 2. Disk Cache check
-        if fileManager.fileExists(atPath: localThumbnailURL.path) {
-            if let image = loadCachedThumbnail(at: localThumbnailURL) {
-                thumbnailMemoryStore.store(image, forKey: cacheKeyString)
-                return image
-            }
-        }
-
-        // 2b. Legacy Stackroom Thumbnail Check (Instant reuse of pre-rendered assets)
-        if let legacyID = request.legacyID {
-            let legacyThumbPath = NSHomeDirectory() + "/Library/Application Support/Stackroom/Stackroom Library/\(legacyID)/thumbnail.jpg"
-            if fileManager.fileExists(atPath: legacyThumbPath) {
-                let legacyThumbURL = URL(fileURLWithPath: legacyThumbPath)
-                if let image = loadCachedThumbnail(at: legacyThumbURL) {
-                    thumbnailMemoryStore.store(image, forKey: cacheKeyString)
-                    try? fileManager.copyItem(atPath: legacyThumbPath, toPath: localThumbnailURL.path)
-                    return image
-                }
-            }
-        }
-
-        return nil
-    }
-
     private func performLoad(_ request: ThumbnailRequest) async -> NSImage? {
         let cacheKeyString = request.itemID.uuidString
-        let localThumbnailURL = cacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
 
-        if let rendered = renderedThumbnail(for: request) {
+        if let rendered = await Self.renderedCoverImage(for: request) {
             return rendered
         }
 
@@ -258,15 +275,18 @@ final class ThumbnailCache {
 
         // 3. Source Extraction
         // The request already carries plain values copied from the SwiftData model,
-        // so bookmark resolution, security-scope setup, fileExists, and ZIP
-        // extraction — all of which can be slow on network volumes (SMB/AFP) — run
-        // on DispatchQueue.global and never block the cooperative thread pool.
+        // so bookmark resolution, security-scope setup, fileExists, ZIP extraction,
+        // and the decode/re-encode of the thumbnail itself all run on
+        // DispatchQueue.global. Keeping the CPU work off the actor matters as much
+        // as keeping the I/O off it: on the actor, a prefetched cover being decoded
+        // would stall the disk read for the cover actually on screen.
+        let localThumbnailURL = thumbnailCacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
         let itemBookmark = request.itemBookmark
         let volumeBookmark = request.volumeBookmark
         let volumeLastKnownPath = request.volumeLastKnownPath
         let relativePath = request.relativePath
 
-        let coverData: Data? = await withCheckedContinuation { continuation in
+        let thumbnail: NSImage? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 var resolvedURL: URL? = nil
                 var securityAnchor: URL? = nil
@@ -308,21 +328,27 @@ final class ThumbnailCache {
                     continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: CoverSelector.preferredCoverData(bookURL: fileURL))
+
+                guard let coverData = CoverSelector.preferredCoverData(bookURL: fileURL),
+                      let thumbnail = ThumbnailCache.createThumbnail(from: coverData) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                // Write thumbnail to Disk Cache
+                if let tiff = thumbnail.tiffRepresentation,
+                   let bitmap = NSBitmapImageRep(data: tiff),
+                   let jpegData = bitmap.representation(using: .jpeg, properties: [:]) {
+                    try? jpegData.write(to: localThumbnailURL, options: .atomic)
+                }
+
+                continuation.resume(returning: thumbnail)
             }
         }
 
-        guard let coverData,
-              let thumbnail = createThumbnail(from: coverData) else {
+        guard let thumbnail else {
             missingCoverKeys.insert(cacheKeyString)
             return nil
-        }
-
-        // Write thumbnail to Disk Cache
-        if let tiff = thumbnail.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff),
-           let jpegData = bitmap.representation(using: .jpeg, properties: [:]) {
-            try? jpegData.write(to: localThumbnailURL, options: .atomic)
         }
 
         // Put in Memory Cache
@@ -343,9 +369,9 @@ final class ThumbnailCache {
     /// overwriting the disk and memory caches. Returns the stored thumbnail.
     @discardableResult
     func setCustomCover(forItemID itemID: UUID, imageData: Data) -> NSImage? {
-        guard let thumbnail = createThumbnail(from: imageData) else { return nil }
+        guard let thumbnail = Self.createThumbnail(from: imageData) else { return nil }
 
-        let localThumbnailURL = cacheDirectory.appendingPathComponent("\(itemID.uuidString).jpg")
+        let localThumbnailURL = thumbnailCacheDirectory.appendingPathComponent("\(itemID.uuidString).jpg")
         if let tiff = thumbnail.tiffRepresentation,
            let bitmap = NSBitmapImageRep(data: tiff),
            let jpegData = bitmap.representation(using: .jpeg, properties: [:]) {
@@ -363,7 +389,8 @@ final class ThumbnailCache {
         prefetchTask = nil
         thumbnailMemoryStore.removeAll()
         missingCoverKeys.removeAll()
-        if let files = try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) {
+        let fileManager = FileManager.default
+        if let files = try? fileManager.contentsOfDirectory(at: thumbnailCacheDirectory, includingPropertiesForKeys: nil) {
             for file in files {
                 try? fileManager.removeItem(at: file)
             }
