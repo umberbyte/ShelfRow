@@ -215,6 +215,24 @@ struct ShelfRowTests {
         #expect(SmartConditionsCodec.matches(item, conditions: excludes))
     }
 
+    @Test func coverPrefetchWindowOrdersNeighborsNearestFirst() {
+        let indices = CoverPrefetchWindow.indices(around: 5, count: 20, radius: 3)
+
+        #expect(indices == [6, 4, 7, 3, 8, 2])
+    }
+
+    @Test func coverPrefetchWindowClampsToListBounds() {
+        #expect(CoverPrefetchWindow.indices(around: 0, count: 3, radius: 5) == [1, 2])
+        #expect(CoverPrefetchWindow.indices(around: 2, count: 3, radius: 5) == [1, 0])
+    }
+
+    @Test func coverPrefetchWindowIsEmptyWithoutNeighborsToLoad() {
+        #expect(CoverPrefetchWindow.indices(around: 0, count: 0, radius: 4).isEmpty)
+        #expect(CoverPrefetchWindow.indices(around: 1, count: 5, radius: 0).isEmpty)
+        #expect(CoverPrefetchWindow.indices(around: 9, count: 5, radius: 2).isEmpty)
+        #expect(CoverPrefetchWindow.indices(around: 0, count: 1, radius: 8).isEmpty)
+    }
+
     private enum TestImageType {
         case jpeg
         case png

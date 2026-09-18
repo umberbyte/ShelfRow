@@ -70,16 +70,23 @@ struct CoverImageView: View {
         }
     }
     
+    @MainActor
     private func loadImage() async {
-        if isLoading { return }
-        isLoading = true
-        image = nil
-
-        let loadedImage = await ThumbnailCache.shared.getCoverImage(for: item)
-
-        await MainActor.run {
-            self.image = loadedImage
-            self.isLoading = false
+        // Already decoded: draw it in this frame rather than blanking the view
+        // for an actor hop that would only hand back the same image.
+        if let cached = ThumbnailCache.cachedImage(forItemID: item.id) {
+            image = cached
+            isLoading = false
+            return
         }
+
+        image = nil
+        isLoading = true
+
+        let loadedImage = await ThumbnailCache.shared.getCoverImage(for: ThumbnailRequest(item: item))
+        guard !Task.isCancelled else { return }
+
+        image = loadedImage
+        isLoading = false
     }
 }

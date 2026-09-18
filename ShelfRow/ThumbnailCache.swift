@@ -15,17 +15,83 @@ actor ThumbnailCacheActor {
     static let shared = ThumbnailCacheActor()
 }
 
+/// Everything the loader needs from an `Item`, captured as plain values so cover
+/// loading never reaches back into the SwiftData model from another actor.
+struct ThumbnailRequest: Sendable, Hashable {
+    let itemID: UUID
+    let legacyID: Int?
+    let itemBookmark: Data?
+    let volumeBookmark: Data?
+    let volumeLastKnownPath: String
+    let relativePath: String
+
+    init(item: Item) {
+        self.itemID = item.id
+        self.legacyID = item.legacyID
+        self.itemBookmark = item.bookmarkData
+        self.volumeBookmark = item.volume?.bookmarkData
+        self.volumeLastKnownPath = item.volume?.lastKnownPath ?? ""
+        self.relativePath = item.relativePath
+    }
+}
+
+/// Picks which covers to warm up around the one currently on screen.
+enum CoverPrefetchWindow {
+    /// Indices surrounding `index`, nearest first and forward before backward,
+    /// clamped to `0..<count`. `index` itself is excluded: the visible cover is
+    /// requested by the view that shows it.
+    static func indices(around index: Int, count: Int, radius: Int) -> [Int] {
+        guard count > 0, radius > 0, index >= 0, index < count else { return [] }
+
+        var result: [Int] = []
+        for distance in 1...radius {
+            let after = index + distance
+            if after < count { result.append(after) }
+            let before = index - distance
+            if before >= 0 { result.append(before) }
+        }
+        return result
+    }
+}
+
+/// `NSCache` is already thread-safe, so the memory tier lives outside the actor:
+/// the UI can check it synchronously and draw an image it has decoded before in
+/// the same frame, instead of showing a placeholder for one actor hop.
+private final class ThumbnailMemoryStore: @unchecked Sendable {
+    private let cache = NSCache<NSString, NSImage>()
+
+    init(countLimit: Int) {
+        cache.countLimit = countLimit
+    }
+
+    func image(forKey key: String) -> NSImage? {
+        cache.object(forKey: key as NSString)
+    }
+
+    func store(_ image: NSImage, forKey key: String) {
+        cache.setObject(image, forKey: key as NSString)
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+    }
+}
+
+/// Limited to 200 images to prevent RAM pressure on large libraries.
+private let thumbnailMemoryStore = ThumbnailMemoryStore(countLimit: 200)
+
 /// A highly-efficient, thread-safe asynchronous cache for cover images
 /// with in-memory NSCache and disk file caching.
 @ThumbnailCacheActor
 final class ThumbnailCache {
-    
+
     static let shared = ThumbnailCache()
-    
-    private let memoryCache = NSCache<NSString, NSImage>()
+
     private var missingCoverKeys: Set<String> = []
+    private var inFlightLoads: [UUID: Task<NSImage?, Never>] = [:]
+    private var prefetchTask: Task<Void, Never>?
     private let fileManager = FileManager.default
-    
+
     /// Shared thumbnails disk-cache location (also used by the importer and
     /// the legacy thumbnail migration).
     nonisolated static var diskCacheDirectory: URL {
@@ -37,45 +103,15 @@ final class ThumbnailCache {
     }
 
     private let cacheDirectory: URL = ThumbnailCache.diskCacheDirectory
-    
-    private init() {
-        memoryCache.countLimit = 200 // Limit to 200 images in memory to prevent RAM pressure
-    }
-    
-    /// Resolves the file URL for an Item, handling security scoped bookmarks if available.
-    private func resolveURL(for item: Item) -> (URL?, URL?) {
-        // Item-level bookmark (drag & drop registration) takes precedence
-        if let bookmark = item.bookmarkData {
-            var isStale = false
-            if let resolved = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
-               resolved.startAccessingSecurityScopedResource() {
-                return (resolved, resolved)
-            }
-        }
 
-        guard let volume = item.volume else { return (nil, nil) }
-        
-        let volumeURL: URL
-        var securityAnchorURL: URL? = nil
-        
-        // Handle security scoping
-        if let bookmark = volume.bookmarkData {
-            var isStale = false
-            if let resolved = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale) {
-                _ = resolved.startAccessingSecurityScopedResource()
-                volumeURL = resolved
-                securityAnchorURL = resolved
-            } else {
-                volumeURL = URL(fileURLWithPath: volume.lastKnownPath)
-            }
-        } else {
-            volumeURL = URL(fileURLWithPath: volume.lastKnownPath)
-        }
-        
-        let fileURL = volumeURL.appendingPathComponent(item.relativePath)
-        return (fileURL, securityAnchorURL)
+    private init() {}
+
+    /// Synchronous peek at the memory tier, for callers that can draw the cover
+    /// immediately when it has already been decoded.
+    nonisolated static func cachedImage(forItemID itemID: UUID) -> NSImage? {
+        thumbnailMemoryStore.image(forKey: itemID.uuidString)
     }
-    
+
     /// Scale down raw image data to a high-quality thumbnail using CGImageSource.
     /// This is extremely memory-efficient as it does not load the full-res image into RAM.
     private func createThumbnail(from data: Data, maxPixelSize: Int = 400) -> NSImage? {
@@ -116,33 +152,74 @@ final class ThumbnailCache {
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
     
-    /// Retrieves the cover image for an Item, loading from Memory -> Disk -> Source Extraction.
-    func getCoverImage(for item: Item) async -> NSImage? {
-        let cacheKeyString = item.id.uuidString
-        let cacheKey = cacheKeyString as NSString
-
+    /// Retrieves the cover image for an item, loading from Memory -> Disk -> Source
+    /// Extraction. Requests for the same item share a single load, so selecting a
+    /// cover that a prefetch is already working on never extracts it twice.
+    func getCoverImage(for request: ThumbnailRequest) async -> NSImage? {
         // 1. Memory Cache check (instant)
-        if let cachedImage = memoryCache.object(forKey: cacheKey) {
+        if let cachedImage = thumbnailMemoryStore.image(forKey: request.itemID.uuidString) {
             return cachedImage
         }
 
-        let localThumbnailURL = cacheDirectory.appendingPathComponent("\(item.id.uuidString).jpg")
+        if let runningLoad = inFlightLoads[request.itemID] {
+            return await runningLoad.value
+        }
+
+        let load = Task { await self.performLoad(request) }
+        inFlightLoads[request.itemID] = load
+        let image = await load.value
+        inFlightLoads[request.itemID] = nil
+        return image
+    }
+
+    /// Warms the memory cache for covers the user is about to reach. Loads run one
+    /// at a time so a slow volume (SMB/AFP) is never hit with a burst, and a new
+    /// window replaces the one before it.
+    func prefetch(_ requests: [ThumbnailRequest]) {
+        prefetchTask?.cancel()
+
+        let pending = requests.filter { request in
+            thumbnailMemoryStore.image(forKey: request.itemID.uuidString) == nil
+                && !missingCoverKeys.contains(request.itemID.uuidString)
+        }
+        guard !pending.isEmpty else {
+            prefetchTask = nil
+            return
+        }
+
+        prefetchTask = Task { [weak self] in
+            // Let a burst of arrow-key navigation settle first: a load that has
+            // already started cannot be called back, so held-down keys would
+            // otherwise stack up extractions the user has scrolled past.
+            try? await Task.sleep(for: .milliseconds(150))
+            if Task.isCancelled { return }
+
+            for request in pending {
+                if Task.isCancelled { return }
+                _ = await self?.getCoverImage(for: request)
+            }
+        }
+    }
+
+    private func performLoad(_ request: ThumbnailRequest) async -> NSImage? {
+        let cacheKeyString = request.itemID.uuidString
+        let localThumbnailURL = cacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
 
         // 2. Disk Cache check
         if fileManager.fileExists(atPath: localThumbnailURL.path) {
             if let image = loadCachedThumbnail(at: localThumbnailURL) {
-                memoryCache.setObject(image, forKey: cacheKey)
+                thumbnailMemoryStore.store(image, forKey: cacheKeyString)
                 return image
             }
         }
 
         // 2b. Legacy Stackroom Thumbnail Check (Instant reuse of pre-rendered assets)
-        if let legacyID = item.legacyID {
+        if let legacyID = request.legacyID {
             let legacyThumbPath = NSHomeDirectory() + "/Library/Application Support/Stackroom/Stackroom Library/\(legacyID)/thumbnail.jpg"
             if fileManager.fileExists(atPath: legacyThumbPath) {
                 let legacyThumbURL = URL(fileURLWithPath: legacyThumbPath)
                 if let image = loadCachedThumbnail(at: legacyThumbURL) {
-                    memoryCache.setObject(image, forKey: cacheKey)
+                    thumbnailMemoryStore.store(image, forKey: cacheKeyString)
                     try? fileManager.copyItem(atPath: legacyThumbPath, toPath: localThumbnailURL.path)
                     return image
                 }
@@ -154,14 +231,14 @@ final class ThumbnailCache {
         }
 
         // 3. Source Extraction
-        // Read SwiftData model values here on the actor (safe), then hand off raw
-        // values to DispatchQueue.global so that bookmark resolution, security-scope
-        // setup, fileExists, and ZIP extraction — all of which can be slow on
-        // network volumes (SMB/AFP) — never block the cooperative thread pool.
-        let itemBookmark = item.bookmarkData
-        let volumeBookmark = item.volume?.bookmarkData
-        let volumeLastKnownPath = item.volume?.lastKnownPath ?? ""
-        let relativePath = item.relativePath
+        // The request already carries plain values copied from the SwiftData model,
+        // so bookmark resolution, security-scope setup, fileExists, and ZIP
+        // extraction — all of which can be slow on network volumes (SMB/AFP) — run
+        // on DispatchQueue.global and never block the cooperative thread pool.
+        let itemBookmark = request.itemBookmark
+        let volumeBookmark = request.volumeBookmark
+        let volumeLastKnownPath = request.volumeLastKnownPath
+        let relativePath = request.relativePath
 
         let coverData: Data? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
@@ -223,7 +300,7 @@ final class ThumbnailCache {
         }
 
         // Put in Memory Cache
-        memoryCache.setObject(thumbnail, forKey: cacheKey)
+        thumbnailMemoryStore.store(thumbnail, forKey: cacheKeyString)
         missingCoverKeys.remove(cacheKeyString)
         return thumbnail
     }
@@ -249,14 +326,16 @@ final class ThumbnailCache {
             try? jpegData.write(to: localThumbnailURL, options: .atomic)
         }
 
-        memoryCache.setObject(thumbnail, forKey: itemID.uuidString as NSString)
+        thumbnailMemoryStore.store(thumbnail, forKey: itemID.uuidString)
         missingCoverKeys.remove(itemID.uuidString)
         return thumbnail
     }
 
     /// Clears both memory and disk cache.
     func clearCache() {
-        memoryCache.removeAllObjects()
+        prefetchTask?.cancel()
+        prefetchTask = nil
+        thumbnailMemoryStore.removeAll()
         missingCoverKeys.removeAll()
         if let files = try? fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) {
             for file in files {

@@ -1922,6 +1922,22 @@ struct ContentView: View {
 
         lastKeyboardScrollIndex = newIndex
         scrollPositionItemID = id
+        prefetchNeighborCovers()
+    }
+
+    /// How many covers on each side of the cursor are warmed up in advance.
+    private static let coverPrefetchRadius = 8
+
+    /// Loads the covers around the cursor into memory so the inspector image is
+    /// already decoded by the time the selection reaches it.
+    private func prefetchNeighborCovers() {
+        guard let index = selectedDisplayIndex else { return }
+        let requests = CoverPrefetchWindow
+            .indices(around: index, count: displayItems.count, radius: Self.coverPrefetchRadius)
+            .map { ThumbnailRequest(item: displayItems[$0]) }
+        guard !requests.isEmpty else { return }
+
+        Task { await ThumbnailCache.shared.prefetch(requests) }
     }
 
     private func refreshSelectedDisplayIndex() {
@@ -1947,6 +1963,7 @@ struct ContentView: View {
         if selectedItemIDs.isEmpty {
             selectedItemIDs = [selectedItemID]
         }
+        prefetchNeighborCovers()
     }
 
     private func clickOverlay(for item: Item) -> some View {
@@ -1982,6 +1999,7 @@ struct ContentView: View {
         } else {
             selectedDisplayIndex = displayItems.firstIndex { $0.id == selectedItemID }
             lastKeyboardScrollIndex = selectedDisplayIndex
+            prefetchNeighborCovers()
         }
         if !mainContentHasFocus {
             mainContentHasFocus = true
