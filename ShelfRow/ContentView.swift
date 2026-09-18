@@ -21,6 +21,29 @@ enum InspectorField: Hashable {
     case title, author, keywordA, keywordB, memo, genre, relation
 }
 
+private struct ThumbnailRepairScanResult: Sendable {
+    var itemIDs: [UUID]
+    var monochromeCount: Int
+    var landscapeCount: Int
+    var missingCount: Int
+
+    nonisolated init(itemIDs: [UUID] = [], monochromeCount: Int = 0, landscapeCount: Int = 0, missingCount: Int = 0) {
+        self.itemIDs = itemIDs
+        self.monochromeCount = monochromeCount
+        self.landscapeCount = landscapeCount
+        self.missingCount = missingCount
+    }
+
+    nonisolated func merged(with other: ThumbnailRepairScanResult) -> ThumbnailRepairScanResult {
+        ThumbnailRepairScanResult(
+            itemIDs: itemIDs + other.itemIDs,
+            monochromeCount: monochromeCount + other.monochromeCount,
+            landscapeCount: landscapeCount + other.landscapeCount,
+            missingCount: missingCount + other.missingCount
+        )
+    }
+}
+
 private struct SmartShelfEditorPresentation: Identifiable {
     let id: String
     let shelf: Shelf?
@@ -2457,13 +2480,14 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
     }
 
-    /// Generates the covers that are still missing, so browsing a large library is
-    /// not what fills the cache, one archive at a time. Items that already have a
-    /// thumbnail are skipped.
+    /// Generates the covers that are missing, and re-picks the ones that look like
+    /// the wrong page — landscape (a spread) or monochrome (an inside page). A
+    /// thumbnail that is already a good portrait cover is left alone, so browsing a
+    /// large library is not what fills the cache, one archive at a time.
     private func repairThumbnails() {
         let items = allItems
         isImporting = true
-        importMessage = "未生成のサムネイルを探しています..."
+        importMessage = "サムネイルを検査しています..."
         totalBooks = items.count
         processedBooks = 0
         totalPlaylists = 0
@@ -2471,19 +2495,19 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
         Task {
             let cacheDir = ThumbnailCache.diskCacheDirectory
-            let missingIDs = await Task.detached(priority: .userInitiated) {
-                await Self.scanMissingThumbnails(itemIDs: items.map(\.id), cacheDir: cacheDir)
+            let scanResult = await Task.detached(priority: .userInitiated) {
+                await Self.scanThumbnailRepairTargets(itemIDs: items.map(\.id), cacheDir: cacheDir)
             }.value
 
-            let pendingIDs = Set(missingIDs)
-            let pendingItems = items.filter { pendingIDs.contains($0.id) }
-            let alreadyGenerated = items.count - pendingItems.count
-            totalBooks = pendingItems.count
+            let targetIDs = Set(scanResult.itemIDs)
+            let targetItems = items.filter { targetIDs.contains($0.id) }
+            let healthyThumbnails = items.count - targetItems.count
+            totalBooks = targetItems.count
             processedBooks = 0
 
             // Capture what the workers need while still on the main actor: the
             // SwiftData models cannot be read from the tasks doing the extraction.
-            let requests = pendingItems.map { ThumbnailRequest(item: $0) }
+            let requests = targetItems.map { ThumbnailRequest(item: $0) }
 
             let outcome = await ThumbnailCache.generateThumbnails(for: requests) { completed in
                 processedBooks = completed
@@ -2496,46 +2520,76 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
             isImporting = false
             processedBooks = totalBooks
-            importMessage = "サムネイルの一括生成が完了しました。\n\n・生成済みのためスキップ: \(alreadyGenerated)件\n・生成した画像: \(outcome.generated)件\n・生成できず（未接続など）: \(outcome.failed)件"
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・そのまま使用（スキップ）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated)件\n・生成できず（未接続など）: \(outcome.failed)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
     }
 
-    nonisolated private static func scanMissingThumbnails(itemIDs: [UUID], cacheDir: URL) async -> [UUID] {
-        guard !itemIDs.isEmpty else { return [] }
+    nonisolated private static func scanThumbnailRepairTargets(itemIDs: [UUID], cacheDir: URL) async -> ThumbnailRepairScanResult {
+        guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
 
         let workerCount = max(1, ProcessInfo.processInfo.activeProcessorCount)
         let chunkSize = max(100, itemIDs.count / max(1, workerCount * 2))
 
-        return await withTaskGroup(of: [UUID].self) { group in
+        return await withTaskGroup(of: ThumbnailRepairScanResult.self) { group in
             for start in stride(from: 0, to: itemIDs.count, by: chunkSize) {
                 let end = min(start + chunkSize, itemIDs.count)
                 let chunk = Array(itemIDs[start..<end])
                 group.addTask(priority: .utility) {
-                    chunk.filter { itemID in
-                        thumbnailNeedsGenerating(at: cacheDir.appendingPathComponent("\(itemID.uuidString).jpg"))
+                    var result = ThumbnailRepairScanResult()
+                    for itemID in chunk {
+                        let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
+                        guard let reasons = thumbnailRepairReasons(at: thumbURL) else { continue }
+                        result.itemIDs.append(itemID)
+                        if reasons.isMonochrome {
+                            result.monochromeCount += 1
+                        }
+                        if reasons.isLandscape {
+                            result.landscapeCount += 1
+                        }
+                        if reasons.isMissing {
+                            result.missingCount += 1
+                        }
                     }
+                    return result
                 }
             }
 
-            var merged: [UUID] = []
-            for await chunk in group {
-                merged.append(contentsOf: chunk)
+            var merged = ThumbnailRepairScanResult()
+            for await result in group {
+                merged = merged.merged(with: result)
             }
             return merged
         }
     }
 
-    /// True when there is no thumbnail to show yet. A cover that has already been
-    /// generated is left alone: re-reading the archive for a file that is right
-    /// there costs the whole run again for nothing.
-    nonisolated static func thumbnailNeedsGenerating(at thumbURL: URL) -> Bool {
+    /// Why a cover has to be generated, or nil to leave the thumbnail alone.
+    ///
+    /// A landscape thumbnail is usually a spread picked by mistake, and a
+    /// monochrome one usually an inside page rather than the cover; both are worth
+    /// re-picking. A thumbnail that is simply a good portrait cover is never
+    /// re-extracted — reading the archive again for a file already on disk would
+    /// cost the whole run for nothing.
+    nonisolated static func thumbnailRepairReasons(at thumbURL: URL) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
+        // Nothing there yet, an empty file from an interrupted write, or an image
+        // that cannot be read back: generate it.
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: thumbURL.path),
-              let size = attributes[.size] as? Int else {
-            return true
+              let byteSize = attributes[.size] as? Int,
+              byteSize > 0,
+              let size = CoverSelector.imagePixelSize(at: thumbURL) else {
+            return (isMonochrome: false, isLandscape: false, isMissing: true)
         }
-        return size == 0
+
+        if size.width > size.height {
+            return (isMonochrome: false, isLandscape: true, isMissing: false)
+        }
+
+        if CoverSelector.imageIsMonochrome(at: thumbURL) {
+            return (isMonochrome: true, isLandscape: false, isMissing: false)
+        }
+
+        return nil
     }
 
     /// Fills empty display metadata by parsing the file name with the
