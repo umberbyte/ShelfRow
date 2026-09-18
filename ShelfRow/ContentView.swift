@@ -183,6 +183,7 @@ struct ContentView: View {
     @State private var selectedItemIDs: Set<UUID> = []
     @State private var selectionAnchorItemID: UUID? = nil
     @State private var selectedDisplayIndex: Int? = nil
+    @State private var coverPrefetchTask: Task<Void, Never>? = nil
     @State private var lastKeyboardScrollIndex: Int? = nil
     @State private var scrollPositionItemID: UUID? = nil
     @AppStorage("mainViewIsGrid") private var isGridView = false
@@ -1925,19 +1926,29 @@ struct ContentView: View {
         prefetchNeighborCovers()
     }
 
-    /// How many covers on each side of the cursor are warmed up in advance.
-    private static let coverPrefetchRadius = 8
+    /// How many covers on each side of the cursor are warmed up in advance, so a
+    /// window of 50 rows around the selection is already in memory.
+    private static let coverPrefetchRadius = 25
 
     /// Loads the covers around the cursor into memory so the inspector image is
     /// already decoded by the time the selection reaches it.
+    ///
+    /// The window is built only once the cursor settles: reading 50 items out of
+    /// SwiftData on every keypress would cost more on the main thread than the
+    /// prefetching saves.
     private func prefetchNeighborCovers() {
-        guard let index = selectedDisplayIndex else { return }
-        let requests = CoverPrefetchWindow
-            .indices(around: index, count: displayItems.count, radius: Self.coverPrefetchRadius)
-            .map { ThumbnailRequest(item: displayItems[$0]) }
-        guard !requests.isEmpty else { return }
+        coverPrefetchTask?.cancel()
+        coverPrefetchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let index = selectedDisplayIndex else { return }
 
-        Task { await ThumbnailCache.shared.prefetch(requests) }
+            let requests = CoverPrefetchWindow
+                .indices(around: index, count: displayItems.count, radius: Self.coverPrefetchRadius)
+                .map { ThumbnailRequest(item: displayItems[$0]) }
+            guard !requests.isEmpty, !Task.isCancelled else { return }
+
+            await ThumbnailCache.shared.prefetch(requests)
+        }
     }
 
     private func refreshSelectedDisplayIndex() {

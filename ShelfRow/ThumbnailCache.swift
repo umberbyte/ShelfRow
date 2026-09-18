@@ -231,9 +231,13 @@ final class ThumbnailCache {
         return image
     }
 
-    /// Warms the memory cache for covers the user is about to reach. Loads run one
-    /// at a time so a slow volume (SMB/AFP) is never hit with a burst, and a new
-    /// window replaces the one before it.
+    /// How many covers a prefetch window loads at once. Enough to get through a
+    /// large window at a useful rate, few enough that a network volume (SMB/AFP)
+    /// still has room for the cover actually on screen.
+    private static let maxConcurrentPrefetches = 3
+
+    /// Warms the memory cache for covers the user is about to reach. A new window
+    /// replaces the one before it.
     func prefetch(_ requests: [ThumbnailRequest]) {
         prefetchTask?.cancel()
 
@@ -247,17 +251,28 @@ final class ThumbnailCache {
         }
 
         prefetchTask = Task { [weak self] in
-            // Let a burst of arrow-key navigation settle first: a load that has
-            // already started cannot be called back, so held-down keys would
-            // otherwise stack up extractions the user has scrolled past. The delay
-            // also leaves the volume to the cover actually on screen, which starts
-            // loading sooner than this.
-            try? await Task.sleep(for: .milliseconds(300))
+            // Leave the volume to the cover actually on screen, which starts
+            // loading first. The caller has already waited for the cursor to
+            // settle, so this only orders the two.
+            try? await Task.sleep(for: .milliseconds(50))
             if Task.isCancelled { return }
 
-            for request in pending {
-                if Task.isCancelled { return }
-                _ = await self?.getCoverImage(for: request)
+            await withTaskGroup(of: Void.self) { group in
+                var next = 0
+                while next < min(Self.maxConcurrentPrefetches, pending.count) {
+                    let request = pending[next]
+                    group.addTask { _ = await self?.getCoverImage(for: request) }
+                    next += 1
+                }
+
+                // Keep the window sliding: start the next cover each time one
+                // finishes, nearest to the cursor first.
+                while await group.next() != nil {
+                    guard !Task.isCancelled, next < pending.count else { continue }
+                    let request = pending[next]
+                    group.addTask { _ = await self?.getCoverImage(for: request) }
+                    next += 1
+                }
             }
         }
     }
