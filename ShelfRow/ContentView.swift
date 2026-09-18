@@ -2503,36 +2503,22 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             let monochromeSuspects = scanResult.monochromeCount
             let landscapeSuspects = scanResult.landscapeCount
             let missingThumbnails = scanResult.missingCount
-            var repaired = 0
-            var failed = 0
             totalBooks = suspectItems.count
             processedBooks = 0
 
-            for (index, item) in suspectItems.enumerated() {
-                if index % 10 == 0 {
-                    processedBooks = index
-                }
+            // Capture what the workers need while still on the main actor: the
+            // SwiftData models cannot be read from the tasks doing the extraction.
+            let requests = suspectItems.map { ThumbnailRequest(item: $0) }
 
-                // Re-extract using the repair rule:
-                // sequence-first image; if it is monochrome, first portrait
-                // non-monochrome image in name order.
-                guard let resolved = ItemFileAccess.resolve(item: item) else {
-                    failed += 1
-                    continue
-                }
-                let bookURL = resolved.url
-                let coverData = await Task.detached(priority: .utility) {
-                    Self.repairCoverData(bookURL: bookURL)
-                }.value
-                resolved.release()
-
-                if let coverData,
-                   await ThumbnailCache.shared.setCustomCover(forItemID: item.id, imageData: coverData) != nil {
-                    repaired += 1
-                } else {
-                    failed += 1
-                }
+            let outcome = await ThumbnailCache.generateThumbnails(for: requests) { completed in
+                processedBooks = completed
             }
+            let repaired = outcome.generated
+            let failed = outcome.failed
+
+            // The covers just regenerated may still be in memory under their old
+            // contents; drop that tier so the reload below reads the new files.
+            await ThumbnailCache.shared.invalidateMemoryCache()
 
             isImporting = false
             processedBooks = totalBooks
@@ -2598,10 +2584,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
 
         return nil
-    }
-
-    nonisolated private static func repairCoverData(bookURL: URL) -> Data? {
-        CoverSelector.preferredCoverData(bookURL: bookURL)
     }
 
     /// Fills empty display metadata by parsing the file name with the

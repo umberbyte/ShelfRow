@@ -216,6 +216,116 @@ final class ThumbnailCache {
         return nil
     }
 
+    /// Resolves the item's file, picks its cover, renders the thumbnail and writes
+    /// it to the disk cache. This is the expensive path — bookmark resolution, a
+    /// read over the volume, and a decode plus re-encode — so it is nonisolated:
+    /// callers run it on a background queue, and several can run at once.
+    nonisolated static func extractThumbnailToDiskCache(for request: ThumbnailRequest) -> NSImage? {
+        var resolvedURL: URL? = nil
+        var securityAnchor: URL? = nil
+
+        // Item-level bookmark (drag & drop) takes precedence.
+        if let bookmark = request.itemBookmark {
+            var isStale = false
+            if let resolved = try? URL(resolvingBookmarkData: bookmark,
+                                       options: .withSecurityScope,
+                                       relativeTo: nil,
+                                       bookmarkDataIsStale: &isStale),
+               resolved.startAccessingSecurityScopedResource() {
+                resolvedURL = resolved
+                securityAnchor = resolved
+            }
+        }
+
+        // Volume-level bookmark + relative path.
+        if resolvedURL == nil {
+            var volumeURL = URL(fileURLWithPath: request.volumeLastKnownPath)
+            if let bookmark = request.volumeBookmark {
+                var isStale = false
+                if let resolved = try? URL(resolvingBookmarkData: bookmark,
+                                           options: .withSecurityScope,
+                                           relativeTo: nil,
+                                           bookmarkDataIsStale: &isStale) {
+                    _ = resolved.startAccessingSecurityScopedResource()
+                    securityAnchor = resolved
+                    volumeURL = resolved
+                }
+            }
+            resolvedURL = volumeURL.appendingPathComponent(request.relativePath)
+        }
+
+        defer { securityAnchor?.stopAccessingSecurityScopedResource() }
+
+        guard let fileURL = resolvedURL,
+              FileManager.default.fileExists(atPath: fileURL.path),
+              let coverData = CoverSelector.preferredCoverData(bookURL: fileURL),
+              let thumbnail = createThumbnail(from: coverData) else {
+            return nil
+        }
+
+        let localThumbnailURL = thumbnailCacheDirectory
+            .appendingPathComponent("\(request.itemID.uuidString).jpg")
+        if let tiff = thumbnail.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiff),
+           let jpegData = bitmap.representation(using: .jpeg, properties: [:]) {
+            try? jpegData.write(to: localThumbnailURL, options: .atomic)
+        }
+
+        return thumbnail
+    }
+
+    /// Generates covers for a whole batch of items, several at a time.
+    ///
+    /// Sized against the machine rather than run one by one: on a library of tens
+    /// of thousands, serial generation takes hours that the volume and the CPU
+    /// both spend mostly idle. Results go to the disk cache only — holding every
+    /// cover in memory would just evict what the user is looking at.
+    nonisolated static func generateThumbnails(
+        for requests: [ThumbnailRequest],
+        progress: @escaping @MainActor (Int) -> Void
+    ) async -> (generated: Int, failed: Int) {
+        guard !requests.isEmpty else { return (0, 0) }
+
+        let width = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
+        var generated = 0
+        var failed = 0
+        var completed = 0
+
+        await withTaskGroup(of: Bool.self) { group in
+            var next = 0
+            while next < min(width, requests.count) {
+                let request = requests[next]
+                group.addTask(priority: .utility) {
+                    ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil
+                }
+                next += 1
+            }
+
+            while let succeeded = await group.next() {
+                if succeeded {
+                    generated += 1
+                } else {
+                    failed += 1
+                }
+
+                completed += 1
+                if completed % 20 == 0 {
+                    let reached = completed
+                    await progress(reached)
+                }
+
+                guard !Task.isCancelled, next < requests.count else { continue }
+                let request = requests[next]
+                group.addTask(priority: .utility) {
+                    ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil
+                }
+                next += 1
+            }
+        }
+
+        return (generated, failed)
+    }
+
     /// Scale down raw image data to a high-quality thumbnail using CGImageSource.
     /// This is extremely memory-efficient as it does not load the full-res image into RAM.
     nonisolated static func createThumbnail(from data: Data, maxPixelSize: Int = 400) -> NSImage? {
@@ -334,75 +444,13 @@ final class ThumbnailCache {
         }
 
         // 3. Source Extraction
-        // The request already carries plain values copied from the SwiftData model,
-        // so bookmark resolution, security-scope setup, fileExists, ZIP extraction,
-        // and the decode/re-encode of the thumbnail itself all run on
-        // DispatchQueue.global. Keeping the CPU work off the actor matters as much
-        // as keeping the I/O off it: on the actor, a prefetched cover being decoded
-        // would stall the disk read for the cover actually on screen.
-        let localThumbnailURL = thumbnailCacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
-        let itemBookmark = request.itemBookmark
-        let volumeBookmark = request.volumeBookmark
-        let volumeLastKnownPath = request.volumeLastKnownPath
-        let relativePath = request.relativePath
-
+        // Bookmark resolution, the read over the volume, and the decode/re-encode
+        // all run on DispatchQueue.global. Keeping the CPU work off the actor
+        // matters as much as keeping the I/O off it: on the actor, a prefetched
+        // cover being decoded would stall the disk read for the cover on screen.
         let thumbnail: NSImage? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                var resolvedURL: URL? = nil
-                var securityAnchor: URL? = nil
-
-                // Item-level bookmark (drag & drop) takes precedence.
-                if let bookmark = itemBookmark {
-                    var isStale = false
-                    if let resolved = try? URL(resolvingBookmarkData: bookmark,
-                                               options: .withSecurityScope,
-                                               relativeTo: nil,
-                                               bookmarkDataIsStale: &isStale),
-                       resolved.startAccessingSecurityScopedResource() {
-                        resolvedURL = resolved
-                        securityAnchor = resolved
-                    }
-                }
-
-                // Volume-level bookmark + relative path.
-                if resolvedURL == nil {
-                    var volumeURL = URL(fileURLWithPath: volumeLastKnownPath)
-                    if let bookmark = volumeBookmark {
-                        var isStale = false
-                        if let resolved = try? URL(resolvingBookmarkData: bookmark,
-                                                   options: .withSecurityScope,
-                                                   relativeTo: nil,
-                                                   bookmarkDataIsStale: &isStale) {
-                            _ = resolved.startAccessingSecurityScopedResource()
-                            securityAnchor = resolved
-                            volumeURL = resolved
-                        }
-                    }
-                    resolvedURL = volumeURL.appendingPathComponent(relativePath)
-                }
-
-                defer { securityAnchor?.stopAccessingSecurityScopedResource() }
-
-                guard let fileURL = resolvedURL,
-                      FileManager.default.fileExists(atPath: fileURL.path) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                guard let coverData = CoverSelector.preferredCoverData(bookURL: fileURL),
-                      let thumbnail = ThumbnailCache.createThumbnail(from: coverData) else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                // Write thumbnail to Disk Cache
-                if let tiff = thumbnail.tiffRepresentation,
-                   let bitmap = NSBitmapImageRep(data: tiff),
-                   let jpegData = bitmap.representation(using: .jpeg, properties: [:]) {
-                    try? jpegData.write(to: localThumbnailURL, options: .atomic)
-                }
-
-                continuation.resume(returning: thumbnail)
+                continuation.resume(returning: Self.extractThumbnailToDiskCache(for: request))
             }
         }
 
@@ -415,6 +463,13 @@ final class ThumbnailCache {
         thumbnailMemoryStore.store(thumbnail, forKey: cacheKeyString)
         missingCoverKeys.remove(cacheKeyString)
         return thumbnail
+    }
+
+    /// Drops what is held in memory without touching the files on disk, so covers
+    /// regenerated by a bulk pass are picked up instead of the stale ones.
+    func invalidateMemoryCache() {
+        thumbnailMemoryStore.removeAll()
+        missingCoverKeys.removeAll()
     }
 
     func invalidateFailure(forItemID itemID: UUID?) {
