@@ -231,11 +231,27 @@ struct ShelfRowTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: directory.appendingPathComponent("absent.jpg")))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(
+            at: directory.appendingPathComponent("absent.jpg"),
+            alreadyGenerated: false
+        ))
 
         #expect(reasons.isMissing)
         #expect(!reasons.isLandscape)
         #expect(!reasons.isMonochrome)
+    }
+
+    @Test func bulkGenerationRegeneratesAThumbnailItGeneratedIfTheFileIsGone() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let reasons = try #require(ContentView.thumbnailRepairReasons(
+            at: directory.appendingPathComponent("absent.jpg"),
+            alreadyGenerated: true
+        ))
+
+        #expect(reasons.isMissing)
     }
 
     @Test func bulkGenerationTargetsAnEmptyThumbnailFile() throws {
@@ -246,7 +262,7 @@ struct ShelfRowTests {
         let thumbURL = directory.appendingPathComponent("truncated.jpg")
         try Data().write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false))
 
         #expect(reasons.isMissing)
     }
@@ -260,10 +276,29 @@ struct ShelfRowTests {
         try makeTestImage(width: 80, height: 40, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
             .write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false))
 
         #expect(reasons.isLandscape)
         #expect(!reasons.isMissing)
+    }
+
+    @Test func bulkGenerationLeavesACoverItAlreadyExtractedAlone() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // A book whose best page really is a spread, or is monochrome throughout:
+        // re-extracting produces this same image, so a second run must not pick it
+        // up again.
+        let spread = directory.appendingPathComponent("landscape.jpg")
+        try makeTestImage(width: 80, height: 40, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
+            .write(to: spread)
+        let monochrome = directory.appendingPathComponent("monochrome.png")
+        try makeTestImage(width: 40, height: 80, color: CGColor(gray: 0.5, alpha: 1), type: .png)
+            .write(to: monochrome)
+
+        #expect(ContentView.thumbnailRepairReasons(at: spread, alreadyGenerated: true) == nil)
+        #expect(ContentView.thumbnailRepairReasons(at: monochrome, alreadyGenerated: true) == nil)
     }
 
     @Test func bulkGenerationRepicksAMonochromeThumbnailThatIsAlreadyOnDisk() throws {
@@ -275,7 +310,7 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(gray: 0.5, alpha: 1), type: .png)
             .write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false))
 
         #expect(reasons.isMonochrome)
         #expect(!reasons.isMissing)
@@ -290,7 +325,7 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
             .write(to: thumbURL)
 
-        #expect(ContentView.thumbnailRepairReasons(at: thumbURL) == nil)
+        #expect(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false) == nil)
     }
 
     @Test func coverPrefetchWindowIsEmptyWithoutNeighborsToLoad() {

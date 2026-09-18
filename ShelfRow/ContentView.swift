@@ -2495,8 +2495,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
         Task {
             let cacheDir = ThumbnailCache.diskCacheDirectory
+            let itemIDs = items.map(\.id)
             let scanResult = await Task.detached(priority: .userInitiated) {
-                await Self.scanThumbnailRepairTargets(itemIDs: items.map(\.id), cacheDir: cacheDir)
+                await Self.scanThumbnailRepairTargets(
+                    itemIDs: itemIDs,
+                    cacheDir: cacheDir,
+                    alreadyGeneratedIDs: GeneratedCoverLog.load()
+                )
             }.value
 
             let targetIDs = Set(scanResult.itemIDs)
@@ -2513,6 +2518,14 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 processedBooks = completed
             }
 
+            // Record what the current heuristic has now been run against, so a
+            // second pass does not re-read these archives to arrive at the same
+            // image. Items that failed are left out and will be retried.
+            let generatedIDs = outcome.generated
+            await Task.detached(priority: .utility) {
+                GeneratedCoverLog.add(generatedIDs)
+            }.value
+
             // Items whose cover failed to load earlier in the session are
             // remembered as having none; clear that so the reload below picks up
             // what was just generated for them.
@@ -2520,13 +2533,17 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
             isImporting = false
             processedBooks = totalBooks
-            importMessage = "サムネイルの一括生成が完了しました。\n\n・そのまま使用（スキップ）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated)件\n・生成できず（未接続など）: \(outcome.failed)件"
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・そのまま使用（スキップ）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated.count)件\n・生成できず（未接続など）: \(outcome.failed)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
     }
 
-    nonisolated private static func scanThumbnailRepairTargets(itemIDs: [UUID], cacheDir: URL) async -> ThumbnailRepairScanResult {
+    nonisolated private static func scanThumbnailRepairTargets(
+        itemIDs: [UUID],
+        cacheDir: URL,
+        alreadyGeneratedIDs: Set<UUID>
+    ) async -> ThumbnailRepairScanResult {
         guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
 
         let workerCount = max(1, ProcessInfo.processInfo.activeProcessorCount)
@@ -2540,7 +2557,10 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                     var result = ThumbnailRepairScanResult()
                     for itemID in chunk {
                         let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
-                        guard let reasons = thumbnailRepairReasons(at: thumbURL) else { continue }
+                        guard let reasons = thumbnailRepairReasons(
+                            at: thumbURL,
+                            alreadyGenerated: alreadyGeneratedIDs.contains(itemID)
+                        ) else { continue }
                         result.itemIDs.append(itemID)
                         if reasons.isMonochrome {
                             result.monochromeCount += 1
@@ -2567,11 +2587,17 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     /// Why a cover has to be generated, or nil to leave the thumbnail alone.
     ///
     /// A landscape thumbnail is usually a spread picked by mistake, and a
-    /// monochrome one usually an inside page rather than the cover; both are worth
-    /// re-picking. A thumbnail that is simply a good portrait cover is never
-    /// re-extracted — reading the archive again for a file already on disk would
-    /// cost the whole run for nothing.
-    nonisolated static func thumbnailRepairReasons(at thumbURL: URL) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
+    /// monochrome one usually an inside page rather than the cover, so both are
+    /// worth re-picking — but only once. Extraction is deterministic: for a book
+    /// whose best page really is a spread or monochrome, a second pass re-reads the
+    /// archive to produce the very same image and flags it again on the next run.
+    /// So a cover this app has already extracted is judged on whether it is there,
+    /// not on how good a pick it was. A good portrait cover is never re-extracted
+    /// either way.
+    nonisolated static func thumbnailRepairReasons(
+        at thumbURL: URL,
+        alreadyGenerated: Bool
+    ) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
         // Nothing there yet, an empty file from an interrupted write, or an image
         // that cannot be read back: generate it.
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: thumbURL.path),
@@ -2580,6 +2606,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
               let size = CoverSelector.imagePixelSize(at: thumbURL) else {
             return (isMonochrome: false, isLandscape: false, isMissing: true)
         }
+
+        guard !alreadyGenerated else { return nil }
 
         if size.width > size.height {
             return (isMonochrome: false, isLandscape: true, isMissing: false)

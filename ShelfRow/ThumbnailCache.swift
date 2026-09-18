@@ -97,6 +97,36 @@ private let thumbnailMemoryStore = ThumbnailMemoryStore(
 /// re-create the directory on every read.
 private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
 
+/// Remembers which covers this app has already extracted with the current
+/// heuristic.
+///
+/// Extraction is deterministic, so a book whose best page is a spread or a
+/// monochrome page produces a thumbnail that looks wrong by the very rules that
+/// asked for it. Without this record, every bulk run would pick those same books
+/// up again and re-read their archives to arrive at the same image.
+enum GeneratedCoverLog {
+    private static var fileURL: URL {
+        thumbnailCacheDirectory.appendingPathComponent("generated-covers.json")
+    }
+
+    static func load() -> Set<UUID> {
+        guard let data = try? Data(contentsOf: fileURL),
+              let itemIDs = try? JSONDecoder().decode([UUID].self, from: data) else {
+            return []
+        }
+        return Set(itemIDs)
+    }
+
+    static func add(_ itemIDs: [UUID]) {
+        guard !itemIDs.isEmpty else { return }
+
+        var known = load()
+        known.formUnion(itemIDs)
+        guard let data = try? JSONEncoder().encode(Array(known)) else { return }
+        try? data.write(to: fileURL, options: .atomic)
+    }
+}
+
 /// Reading an already-rendered thumbnail gets its own lane: serial, so a full
 /// grid of cells cannot spawn a thread each, and separate from the queue doing
 /// archive extraction, so a cheap read never waits behind an expensive one.
@@ -283,27 +313,27 @@ final class ThumbnailCache {
     nonisolated static func generateThumbnails(
         for requests: [ThumbnailRequest],
         progress: @escaping @MainActor (Int) -> Void
-    ) async -> (generated: Int, failed: Int) {
-        guard !requests.isEmpty else { return (0, 0) }
+    ) async -> (generated: [UUID], failed: Int) {
+        guard !requests.isEmpty else { return ([], 0) }
 
         let width = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
-        var generated = 0
+        var generated: [UUID] = []
         var failed = 0
         var completed = 0
 
-        await withTaskGroup(of: Bool.self) { group in
+        await withTaskGroup(of: (UUID, Bool).self) { group in
             var next = 0
             while next < min(width, requests.count) {
                 let request = requests[next]
                 group.addTask(priority: .utility) {
-                    ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil
+                    (request.itemID, ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil)
                 }
                 next += 1
             }
 
-            while let succeeded = await group.next() {
+            while let (itemID, succeeded) = await group.next() {
                 if succeeded {
-                    generated += 1
+                    generated.append(itemID)
                 } else {
                     failed += 1
                 }
@@ -317,7 +347,7 @@ final class ThumbnailCache {
                 guard !Task.isCancelled, next < requests.count else { continue }
                 let request = requests[next]
                 group.addTask(priority: .utility) {
-                    ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil
+                    (request.itemID, ThumbnailCache.extractThumbnailToDiskCache(for: request) != nil)
                 }
                 next += 1
             }
@@ -495,6 +525,10 @@ final class ThumbnailCache {
 
         thumbnailMemoryStore.store(thumbnail, forKey: itemID.uuidString)
         missingCoverKeys.remove(itemID.uuidString)
+
+        // A cover the user picked by hand is settled: a later bulk pass must not
+        // decide it looks like the wrong page and replace it.
+        GeneratedCoverLog.add([itemID])
         return thumbnail
     }
 
