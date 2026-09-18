@@ -26,7 +26,7 @@ Stackroom で管理していたライブラリ資産（データおよびサム�
 ### 2. Stackroom サムネイルの移行 (`migrateLegacyThumbnails`)
 - **操作**: 「保守」タブ > **「Stackroomサムネイルの移行...」** をクリックし、旧 Stackroom のライブラリフォルダ（`~/Library/Application Support/Stackroom/Stackroom Library/` など）を選択します。
 - **仕様**:
-  - 旧アプリが生成・蓄積していた2万冊規模の表紙サムネイル（`[書籍ID]/thumbnail.jpg`）を、ShelfRow のプライベートキャッシュ領域へ一括物理コピーします。
+  - 旧アプリが生成・蓄積してた表紙サムネイル（`[書籍ID]/thumbnail.jpg`）を、ShelfRow のプライベートキャッシュ領域へ一括物理コピーします。
   - **メリット**: 数万冊のアーカイブ（ZIP）を再解凍・CPU再抽出することなく、数秒〜数十秒で表紙表示が完了します。移行完了後は、旧 Stackroom フォルダを完全に削除しても問題ありません。
 
 ### 3. ボリューム管理・アクセス権の再割り当て (`manageVolumes`)
