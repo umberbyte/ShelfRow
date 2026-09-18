@@ -21,29 +21,6 @@ enum InspectorField: Hashable {
     case title, author, keywordA, keywordB, memo, genre, relation
 }
 
-private struct ThumbnailRepairScanResult: Sendable {
-    var itemIDs: [UUID]
-    var monochromeCount: Int
-    var landscapeCount: Int
-    var missingCount: Int
-
-    nonisolated init(itemIDs: [UUID] = [], monochromeCount: Int = 0, landscapeCount: Int = 0, missingCount: Int = 0) {
-        self.itemIDs = itemIDs
-        self.monochromeCount = monochromeCount
-        self.landscapeCount = landscapeCount
-        self.missingCount = missingCount
-    }
-
-    nonisolated func merged(with other: ThumbnailRepairScanResult) -> ThumbnailRepairScanResult {
-        ThumbnailRepairScanResult(
-            itemIDs: itemIDs + other.itemIDs,
-            monochromeCount: monochromeCount + other.monochromeCount,
-            landscapeCount: landscapeCount + other.landscapeCount,
-            missingCount: missingCount + other.missingCount
-        )
-    }
-}
-
 private struct SmartShelfEditorPresentation: Identifiable {
     let id: String
     let shelf: Shelf?
@@ -2480,13 +2457,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
     }
 
-    /// Bulk thumbnail repair: landscape thumbnails (width > height) are likely
-    /// garbage picks. For those items the cover is re-extracted using the
-    /// sequential-numbering heuristic (lowest number of the largest 連番 group).
+    /// Generates the covers that are still missing, so browsing a large library is
+    /// not what fills the cache, one archive at a time. Items that already have a
+    /// thumbnail are skipped.
     private func repairThumbnails() {
         let items = allItems
         isImporting = true
-        importMessage = "サムネイルを検査・修正しています..."
+        importMessage = "未生成のサムネイルを探しています..."
         totalBooks = items.count
         processedBooks = 0
         totalPlaylists = 0
@@ -2494,96 +2471,71 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
         Task {
             let cacheDir = ThumbnailCache.diskCacheDirectory
-            let scanResult = await Task.detached(priority: .userInitiated) {
-                await Self.scanThumbnailRepairTargets(itemIDs: items.map(\.id), cacheDir: cacheDir)
+            let missingIDs = await Task.detached(priority: .userInitiated) {
+                await Self.scanMissingThumbnails(itemIDs: items.map(\.id), cacheDir: cacheDir)
             }.value
 
-            let suspectIDs = Set(scanResult.itemIDs)
-            let suspectItems = items.filter { suspectIDs.contains($0.id) }
-            let monochromeSuspects = scanResult.monochromeCount
-            let landscapeSuspects = scanResult.landscapeCount
-            let missingThumbnails = scanResult.missingCount
-            totalBooks = suspectItems.count
+            let pendingIDs = Set(missingIDs)
+            let pendingItems = items.filter { pendingIDs.contains($0.id) }
+            let alreadyGenerated = items.count - pendingItems.count
+            totalBooks = pendingItems.count
             processedBooks = 0
 
             // Capture what the workers need while still on the main actor: the
             // SwiftData models cannot be read from the tasks doing the extraction.
-            let requests = suspectItems.map { ThumbnailRequest(item: $0) }
+            let requests = pendingItems.map { ThumbnailRequest(item: $0) }
 
             let outcome = await ThumbnailCache.generateThumbnails(for: requests) { completed in
                 processedBooks = completed
             }
-            let repaired = outcome.generated
-            let failed = outcome.failed
 
-            // The covers just regenerated may still be in memory under their old
-            // contents; drop that tier so the reload below reads the new files.
+            // Items whose cover failed to load earlier in the session are
+            // remembered as having none; clear that so the reload below picks up
+            // what was just generated for them.
             await ThumbnailCache.shared.invalidateMemoryCache()
 
             isImporting = false
             processedBooks = totalBooks
-            importMessage = "サムネイルの一括生成が完了しました。\n\n・未生成: \(missingThumbnails)件\n・モノクロ: \(monochromeSuspects)件\n・横長（ゴミ画像疑い）: \(landscapeSuspects)件\n・生成済み: \(repaired)件\n・生成できず（未接続など）: \(failed)件"
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・生成済みのためスキップ: \(alreadyGenerated)件\n・生成した画像: \(outcome.generated)件\n・生成できず（未接続など）: \(outcome.failed)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
     }
 
-    nonisolated private static func scanThumbnailRepairTargets(itemIDs: [UUID], cacheDir: URL) async -> ThumbnailRepairScanResult {
-        guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
+    nonisolated private static func scanMissingThumbnails(itemIDs: [UUID], cacheDir: URL) async -> [UUID] {
+        guard !itemIDs.isEmpty else { return [] }
 
         let workerCount = max(1, ProcessInfo.processInfo.activeProcessorCount)
         let chunkSize = max(100, itemIDs.count / max(1, workerCount * 2))
 
-        return await withTaskGroup(of: ThumbnailRepairScanResult.self) { group in
+        return await withTaskGroup(of: [UUID].self) { group in
             for start in stride(from: 0, to: itemIDs.count, by: chunkSize) {
                 let end = min(start + chunkSize, itemIDs.count)
                 let chunk = Array(itemIDs[start..<end])
                 group.addTask(priority: .utility) {
-                    var result = ThumbnailRepairScanResult()
-                    for itemID in chunk {
-                        let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
-                        guard let reasons = thumbnailRepairReasons(at: thumbURL) else { continue }
-                        result.itemIDs.append(itemID)
-                        if reasons.isMonochrome {
-                            result.monochromeCount += 1
-                        }
-                        if reasons.isLandscape {
-                            result.landscapeCount += 1
-                        }
-                        if reasons.isMissing {
-                            result.missingCount += 1
-                        }
+                    chunk.filter { itemID in
+                        thumbnailNeedsGenerating(at: cacheDir.appendingPathComponent("\(itemID.uuidString).jpg"))
                     }
-                    return result
                 }
             }
 
-            var merged = ThumbnailRepairScanResult()
-            for await result in group {
-                merged = merged.merged(with: result)
+            var merged: [UUID] = []
+            for await chunk in group {
+                merged.append(contentsOf: chunk)
             }
             return merged
         }
     }
 
-    nonisolated static func thumbnailRepairReasons(at thumbURL: URL) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
-        // No thumbnail yet, or one that cannot be read back: the cover has to be
-        // generated. Without this, browsing is the only thing that ever fills the
-        // cache, one archive at a time, and rows the cursor passes stay blank.
-        guard FileManager.default.fileExists(atPath: thumbURL.path),
-              let size = CoverSelector.imagePixelSize(at: thumbURL) else {
-            return (isMonochrome: false, isLandscape: false, isMissing: true)
+    /// True when there is no thumbnail to show yet. A cover that has already been
+    /// generated is left alone: re-reading the archive for a file that is right
+    /// there costs the whole run again for nothing.
+    nonisolated static func thumbnailNeedsGenerating(at thumbURL: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: thumbURL.path),
+              let size = attributes[.size] as? Int else {
+            return true
         }
-
-        if size.width > size.height {
-            return (isMonochrome: false, isLandscape: true, isMissing: false)
-        }
-
-        if CoverSelector.imageIsMonochrome(at: thumbURL) {
-            return (isMonochrome: true, isLandscape: false, isMissing: false)
-        }
-
-        return nil
+        return size == 0
     }
 
     /// Fills empty display metadata by parsing the file name with the
