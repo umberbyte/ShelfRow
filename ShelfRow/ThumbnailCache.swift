@@ -60,8 +60,9 @@ enum CoverPrefetchWindow {
 private final class ThumbnailMemoryStore: @unchecked Sendable {
     private let cache = NSCache<NSString, NSImage>()
 
-    init(countLimit: Int) {
+    init(countLimit: Int, totalCostLimit: Int) {
         cache.countLimit = countLimit
+        cache.totalCostLimit = totalCostLimit
     }
 
     func image(forKey key: String) -> NSImage? {
@@ -69,16 +70,28 @@ private final class ThumbnailMemoryStore: @unchecked Sendable {
     }
 
     func store(_ image: NSImage, forKey key: String) {
-        cache.setObject(image, forKey: key as NSString)
+        cache.setObject(image, forKey: key as NSString, cost: Self.decodedByteCount(of: image))
     }
 
     func removeAll() {
         cache.removeAllObjects()
     }
+
+    /// Covers vary in size, so the byte budget is what actually bounds RAM; the
+    /// count limit is only a backstop.
+    private static func decodedByteCount(of image: NSImage) -> Int {
+        guard let representation = image.representations.first else { return 1 }
+        return max(1, representation.pixelsWide * representation.pixelsHigh * 4)
+    }
 }
 
-/// Limited to 200 images to prevent RAM pressure on large libraries.
-private let thumbnailMemoryStore = ThumbnailMemoryStore(countLimit: 200)
+/// Sized for browsing a large library: enough covers to keep the rows around a
+/// long scroll resident, bounded by a byte budget rather than a count so the
+/// ceiling holds whatever their dimensions are.
+private let thumbnailMemoryStore = ThumbnailMemoryStore(
+    countLimit: 1500,
+    totalCostLimit: 320 * 1024 * 1024
+)
 
 /// Resolved once: the disk tier runs outside the actor and would otherwise
 /// re-create the directory on every read.
@@ -91,6 +104,26 @@ private let thumbnailReadQueue = DispatchQueue(
     label: "jp.aromatics.ShelfRow.thumbnail-read",
     qos: .userInitiated
 )
+
+/// Lets work already queued on a GCD lane notice that whoever asked for it has
+/// gone away. Dispatch work items cannot be cancelled once enqueued, so the
+/// block checks this instead.
+private final class CancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+}
 
 /// A highly-efficient, thread-safe asynchronous cache for cover images
 /// with in-memory NSCache and disk file caching.
@@ -132,10 +165,22 @@ final class ThumbnailCache {
             return cached
         }
 
-        return await withCheckedContinuation { continuation in
-            thumbnailReadQueue.async {
-                continuation.resume(returning: renderedThumbnail(for: request))
+        let flag = CancellationFlag()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                thumbnailReadQueue.async {
+                    // The cursor has already moved past this row. Decoding it now
+                    // would only delay the row that is actually on screen, which is
+                    // waiting behind it on this lane.
+                    guard !flag.isCancelled else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: renderedThumbnail(for: request))
+                }
             }
+        } onCancel: {
+            flag.cancel()
         }
     }
 

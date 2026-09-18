@@ -25,18 +25,21 @@ private struct ThumbnailRepairScanResult: Sendable {
     var itemIDs: [UUID]
     var monochromeCount: Int
     var landscapeCount: Int
+    var missingCount: Int
 
-    nonisolated init(itemIDs: [UUID] = [], monochromeCount: Int = 0, landscapeCount: Int = 0) {
+    nonisolated init(itemIDs: [UUID] = [], monochromeCount: Int = 0, landscapeCount: Int = 0, missingCount: Int = 0) {
         self.itemIDs = itemIDs
         self.monochromeCount = monochromeCount
         self.landscapeCount = landscapeCount
+        self.missingCount = missingCount
     }
 
     nonisolated func merged(with other: ThumbnailRepairScanResult) -> ThumbnailRepairScanResult {
         ThumbnailRepairScanResult(
             itemIDs: itemIDs + other.itemIDs,
             monochromeCount: monochromeCount + other.monochromeCount,
-            landscapeCount: landscapeCount + other.landscapeCount
+            landscapeCount: landscapeCount + other.landscapeCount,
+            missingCount: missingCount + other.missingCount
         )
     }
 }
@@ -2499,6 +2502,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             let suspectItems = items.filter { suspectIDs.contains($0.id) }
             let monochromeSuspects = scanResult.monochromeCount
             let landscapeSuspects = scanResult.landscapeCount
+            let missingThumbnails = scanResult.missingCount
             var repaired = 0
             var failed = 0
             totalBooks = suspectItems.count
@@ -2532,7 +2536,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
             isImporting = false
             processedBooks = totalBooks
-            importMessage = "サムネイルの一括生成が完了しました。\n\n・モノクロ: \(monochromeSuspects)件\n・横長（ゴミ画像疑い）: \(landscapeSuspects)件\n・生成済み: \(repaired)件\n・生成できず（未接続など）: \(failed)件"
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・未生成: \(missingThumbnails)件\n・モノクロ: \(monochromeSuspects)件\n・横長（ゴミ画像疑い）: \(landscapeSuspects)件\n・生成済み: \(repaired)件\n・生成できず（未接続など）: \(failed)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
@@ -2560,6 +2564,9 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                         if reasons.isLandscape {
                             result.landscapeCount += 1
                         }
+                        if reasons.isMissing {
+                            result.missingCount += 1
+                        }
                     }
                     return result
                 }
@@ -2573,18 +2580,21 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
     }
 
-    nonisolated private static func thumbnailRepairReasons(at thumbURL: URL) -> (isMonochrome: Bool, isLandscape: Bool)? {
+    nonisolated static func thumbnailRepairReasons(at thumbURL: URL) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
+        // No thumbnail yet, or one that cannot be read back: the cover has to be
+        // generated. Without this, browsing is the only thing that ever fills the
+        // cache, one archive at a time, and rows the cursor passes stay blank.
         guard FileManager.default.fileExists(atPath: thumbURL.path),
               let size = CoverSelector.imagePixelSize(at: thumbURL) else {
-            return nil
+            return (isMonochrome: false, isLandscape: false, isMissing: true)
         }
 
         if size.width > size.height {
-            return (isMonochrome: false, isLandscape: true)
+            return (isMonochrome: false, isLandscape: true, isMissing: false)
         }
 
         if CoverSelector.imageIsMonochrome(at: thumbURL) {
-            return (isMonochrome: true, isLandscape: false)
+            return (isMonochrome: true, isLandscape: false, isMissing: false)
         }
 
         return nil

@@ -226,6 +226,45 @@ struct ShelfRowTests {
         #expect(CoverPrefetchWindow.indices(around: 2, count: 3, radius: 5) == [1, 0])
     }
 
+    @Test func thumbnailRepairTreatsAMissingThumbnailAsWorkToDo() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: directory.appendingPathComponent("absent.jpg")))
+
+        #expect(reasons.isMissing)
+        #expect(!reasons.isLandscape)
+        #expect(!reasons.isMonochrome)
+    }
+
+    @Test func thumbnailRepairFlagsLandscapeThumbnailWithoutCallingItMissing() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let thumbURL = directory.appendingPathComponent("landscape.jpg")
+        try makeTestImage(width: 80, height: 40, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
+            .write(to: thumbURL)
+
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
+
+        #expect(reasons.isLandscape)
+        #expect(!reasons.isMissing)
+    }
+
+    @Test func thumbnailRepairLeavesAHealthyThumbnailAlone() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let thumbURL = directory.appendingPathComponent("portrait.jpg")
+        try makeTestImage(width: 40, height: 80, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
+            .write(to: thumbURL)
+
+        #expect(ContentView.thumbnailRepairReasons(at: thumbURL) == nil)
+    }
+
     @Test func coverPrefetchWindowIsEmptyWithoutNeighborsToLoad() {
         #expect(CoverPrefetchWindow.indices(around: 0, count: 0, radius: 4).isEmpty)
         #expect(CoverPrefetchWindow.indices(around: 1, count: 5, radius: 0).isEmpty)

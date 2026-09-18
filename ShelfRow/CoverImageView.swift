@@ -10,8 +10,9 @@ import SwiftUI
 struct CoverImageView: View {
     let item: Item
     @State private var image: NSImage? = nil
+    @State private var showsPreviousCover = false
     @State private var isLoading = false
-    
+
     var body: some View {
         ZStack {
             if let image = image {
@@ -19,6 +20,10 @@ struct CoverImageView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .shadow(radius: 4, x: 2, y: 2)
+                    // Held over from the row before while this one loads: shown so
+                    // the pane never goes empty, faded so it is not mistaken for
+                    // the selected book's cover.
+                    .opacity(showsPreviousCover ? 0.3 : 1)
             } else if isLoading {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.secondary.opacity(0.1))
@@ -76,21 +81,36 @@ struct CoverImageView: View {
         // for an actor hop that would only hand back the same image.
         if let cached = ThumbnailCache.cachedImage(forItemID: item.id) {
             image = cached
+            showsPreviousCover = false
             isLoading = false
             return
         }
 
-        image = nil
         isLoading = false
 
         let request = ThumbnailRequest(item: item)
+
+        // Blanking the view for a load that resolves in a few milliseconds reads as
+        // flicker, and while an arrow key is held it reads as covers not loading at
+        // all. Hold the previous cover until either the new one arrives or the wait
+        // grows long enough to be worth admitting to.
+        showsPreviousCover = image != nil
+        let clearPreviousCover = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            image = nil
+            showsPreviousCover = false
+        }
+        defer { clearPreviousCover.cancel() }
 
         // Thumbnails that are merely on disk still draw right away: reading one is
         // cheap enough to keep up with the cursor, and this path stays off the
         // cache actor so prefetching cannot hold it up.
         if let rendered = await ThumbnailCache.renderedCoverImage(for: request) {
             guard !Task.isCancelled else { return }
+            clearPreviousCover.cancel()
             image = rendered
+            showsPreviousCover = false
             return
         }
         guard !Task.isCancelled else { return }
@@ -107,6 +127,7 @@ struct CoverImageView: View {
         guard !Task.isCancelled else { return }
 
         image = loadedImage
+        showsPreviousCover = false
         isLoading = false
     }
 }
