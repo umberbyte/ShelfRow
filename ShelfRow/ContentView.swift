@@ -2376,8 +2376,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.title = "旧Stackroomサムネイルフォルダの選択"
-        panel.message = "表紙サムネイルを移行するには、旧Stackroomの「Stackroom Library」フォルダを選択してください。（キャンセルするとサムネイルなしでインポートします）"
+        panel.title = "Stackroomサムネイルフォルダの選択"
+        panel.message = "表紙サムネイルを移行するには、Stackroomの「Stackroom Library」フォルダを選択してください。（キャンセルするとサムネイルなしでインポートします）"
         panel.prompt = "このフォルダを移行"
         // The real (non-container) legacy location as the starting point
         panel.directoryURL = URL(fileURLWithPath: "/Users/\(NSUserName())/Library/Application Support/Stackroom")

@@ -893,12 +893,12 @@ struct MaintenanceSettingsView: View {
                 )
                 maintenanceRow(
                     title: "XMLライブラリのインポート...",
-                    description: "旧StackroomのLibrary XMLを読み込み、既存データへマージします。",
+                    description: "StackroomのLibrary XMLを読み込み、既存データへマージします。",
                     action: .importXMLLibrary
                 )
                 maintenanceRow(
-                    title: "旧Stackroomサムネイルの移行...",
-                    description: "旧Stackroom Library内のthumbnail.jpgをShelfRowのキャッシュへコピーします。",
+                    title: "Stackroomサムネイルの移行...",
+                    description: "Stackroom Library内のthumbnail.jpgをShelfRowのキャッシュへコピーします。",
                     action: .migrateLegacyThumbnails
                 )
                 maintenanceRow(
