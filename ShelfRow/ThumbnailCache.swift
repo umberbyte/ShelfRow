@@ -190,8 +190,10 @@ final class ThumbnailCache {
         prefetchTask = Task { [weak self] in
             // Let a burst of arrow-key navigation settle first: a load that has
             // already started cannot be called back, so held-down keys would
-            // otherwise stack up extractions the user has scrolled past.
-            try? await Task.sleep(for: .milliseconds(150))
+            // otherwise stack up extractions the user has scrolled past. The delay
+            // also leaves the volume to the cover actually on screen, which starts
+            // loading sooner than this.
+            try? await Task.sleep(for: .milliseconds(300))
             if Task.isCancelled { return }
 
             for request in pending {
@@ -201,7 +203,20 @@ final class ThumbnailCache {
         }
     }
 
-    private func performLoad(_ request: ThumbnailRequest) async -> NSImage? {
+    /// Memory -> disk -> legacy Stackroom thumbnail, stopping short of extracting
+    /// the cover from the archive. Callers that must stay responsive while the
+    /// cursor is moving use this to show what is already rendered without queueing
+    /// work on a slow volume.
+    func cachedCoverImage(for request: ThumbnailRequest) async -> NSImage? {
+        if let cachedImage = thumbnailMemoryStore.image(forKey: request.itemID.uuidString) {
+            return cachedImage
+        }
+        return renderedThumbnail(for: request)
+    }
+
+    /// The tiers that only read already-rendered thumbnails (local disk cache and
+    /// the Stackroom library), both cheap enough to run while scrolling.
+    private func renderedThumbnail(for request: ThumbnailRequest) -> NSImage? {
         let cacheKeyString = request.itemID.uuidString
         let localThumbnailURL = cacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
 
@@ -224,6 +239,17 @@ final class ThumbnailCache {
                     return image
                 }
             }
+        }
+
+        return nil
+    }
+
+    private func performLoad(_ request: ThumbnailRequest) async -> NSImage? {
+        let cacheKeyString = request.itemID.uuidString
+        let localThumbnailURL = cacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
+
+        if let rendered = renderedThumbnail(for: request) {
+            return rendered
         }
 
         if missingCoverKeys.contains(cacheKeyString) {

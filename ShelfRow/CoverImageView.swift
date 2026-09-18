@@ -81,9 +81,28 @@ struct CoverImageView: View {
         }
 
         image = nil
-        isLoading = true
+        isLoading = false
 
-        let loadedImage = await ThumbnailCache.shared.getCoverImage(for: ThumbnailRequest(item: item))
+        let request = ThumbnailRequest(item: item)
+
+        // Thumbnails that are merely on disk still draw right away: reading one is
+        // cheap enough to keep up with the cursor.
+        if let rendered = await ThumbnailCache.shared.cachedCoverImage(for: request) {
+            guard !Task.isCancelled else { return }
+            image = rendered
+            return
+        }
+        guard !Task.isCancelled else { return }
+
+        // Everything left has to come out of the archive. Holding an arrow key
+        // would queue one extraction per row it passes, and the row the cursor
+        // lands on would then wait behind all of them — so start only once the
+        // selection has settled here.
+        try? await Task.sleep(for: .milliseconds(200))
+        guard !Task.isCancelled else { return }
+
+        isLoading = true
+        let loadedImage = await ThumbnailCache.shared.getCoverImage(for: request)
         guard !Task.isCancelled else { return }
 
         image = loadedImage
