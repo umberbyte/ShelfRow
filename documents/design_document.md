@@ -385,7 +385,7 @@ Mac 複数台および iPad で書誌メタデータを共有する機能の設�
 *   **書誌メタデータ（Item / Shelf / Volume / CoverExtractionRecord）と共有設定は iCloud（SwiftData + CloudKit / KVS）で同期**する。サムネイルと書籍実体は iCloud に送らない。
 *   **未サインイン・スイッチ OFF 時はローカル動作。** 同じストアファイルを開き方（`cloudKitDatabase`）だけ変えて往復できる。サインアウトでローカルデータが消える経路に入らない。
 *   **Security-Scoped Bookmark とサムネイル取得状態は端末固有**として第2の非同期ストア（`LocalBookmark` / `LocalCoverState`）へ分離する。
-*   **サムネイルは NAS 上の配布元から端末ごとに取得。** 差分検出は `Item.coverVersion`（CloudKit 同期）で行い、NAS のディレクトリ列挙はしない。初回は容量警告つき一括、以降は差分。
+*   **サムネイルは NAS 上の配布元から端末ごとに取得。** 差分検出は `Item.coverVersion`（CloudKit 同期）で行い、NAS のディレクトリ列挙はしない。初回は容量警告つき一括、以降は差分。配布元のレイアウト・端末ごとの取得状態（`LocalCoverState`）・失敗時の扱い・役割との関係は分冊 §21 に確定仕様としてまとめている（2026-09-19 確定・未実装）。
 *   環境設定に「iCloud」タブ（スイッチ・状態・アカウント ID・最終同期・エラー）を追加する。
 *   **「iCloudへ全件を再送信」を備える。** CloudKit ミラーリングはレコードごとの送信済みフラグをローカルに持ち、それが iCloud の実態と食い違うと（Development から Production への切り替えがこれを起こす）二度と追いつけない。全オブジェクトに無害な変更を与えてフラグを立て直す経路が必要（分冊 §20）。
 
