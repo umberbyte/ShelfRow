@@ -547,6 +547,23 @@ struct CloudSyncRetryTests {
         #expect(CloudAccountMonitor.retryInterval(for: ckError(.notAuthenticated)) == nil)
     }
 
+    @Test func aPartialFailureReportsTheServersOwnReason() {
+        // What a library first meets a production schema with: the outer error
+        // says nothing, and the sentence naming the fix is two levels down.
+        let inner = NSError(domain: CKErrorDomain, code: CKError.Code.invalidArguments.rawValue,
+                            userInfo: ["ServerErrorDescription": "Cannot create new type CDMR in production schema"])
+        let outer = NSError(domain: CKErrorDomain, code: CKError.Code.partialFailure.rawValue,
+                            userInfo: [CKPartialErrorsByItemIDKey: ["record": inner]])
+        #expect(CloudAccountMonitor.describe(outer) == "Cannot create new type CDMR in production schema")
+    }
+
+    @Test func anErrorWithNothingToAddKeepsItsOwnWords() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: 4099,
+                            userInfo: [NSLocalizedDescriptionKey: "何かが起きました"])
+        #expect(CloudAccountMonitor.describe(error) == "何かが起きました")
+        #expect(CloudAccountMonitor.describe(nil) == nil)
+    }
+
     @Test func nonCloudKitErrorsAreLeftAlone() {
         let error = NSError(domain: NSCocoaErrorDomain, code: 4099)
         #expect(CloudAccountMonitor.retryInterval(for: error) == nil)

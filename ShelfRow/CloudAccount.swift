@@ -127,7 +127,7 @@ final class CloudAccountMonitor {
                   event.endDate != nil else { return }
             let succeeded = event.succeeded
             let error = event.error as? NSError
-            let message = error?.localizedDescription
+            let message = Self.describe(error)
             let retryAfter = Self.retryInterval(for: error)
             MainActor.assumeIsolated {
                 self?.recordSyncEvent(succeeded: succeeded, errorMessage: message, retryAfter: retryAfter)
@@ -216,6 +216,41 @@ final class CloudAccountMonitor {
             Self.logger.error("Could not delete this app's iCloud data: \(error.localizedDescription, privacy: .public)")
             lastPurgeMessage = "iCloudのデータを削除できませんでした: \(error.localizedDescription)"
         }
+    }
+
+    /// What actually went wrong, in words worth showing someone.
+    ///
+    /// A failed sync usually arrives as `partialFailure`, whose own description
+    /// is the useless "The operation couldn't be completed", while the reason
+    /// sits one level down in the per-record errors — and the part that tells
+    /// you what to do is the server's own message, which is not in
+    /// `localizedDescription` at all. Worth digging out: "Cannot create new
+    /// type CDMR in production schema" names the fix, "CKErrorDomain error 2"
+    /// names nothing.
+    nonisolated static func describe(_ error: NSError?) -> String? {
+        guard let error else { return nil }
+
+        if let partial = error.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Any] {
+            let reasons = partial.values
+                .compactMap { $0 as? NSError }
+                .compactMap(serverReason)
+            if let first = Set(reasons).sorted().first {
+                return first
+            }
+        }
+        return serverReason(error) ?? error.localizedDescription
+    }
+
+    private nonisolated static func serverReason(_ error: NSError) -> String? {
+        for key in ["ServerErrorDescription", "CKErrorDescription"] {
+            if let description = error.userInfo[key] as? String, !description.isEmpty {
+                return description
+            }
+        }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return serverReason(underlying)
+        }
+        return nil
     }
 
     /// How long CloudKit wants us to wait, for the errors it expects to pass on
