@@ -598,7 +598,21 @@ struct ThumbnailDistributionTests {
         let url = ThumbnailDistribution.fileURL(forItemID: itemID, in: root)
 
         #expect(url.lastPathComponent == "\(itemID.uuidString).jpg")
-        #expect(url.deletingLastPathComponent().lastPathComponent == "AB")
+        // Lower-cased: a share that lower-cases directories as it creates them
+        // but resolves paths case-sensitively answers "AB" with both "that
+        // exists" and "there is no such directory", which cost every cover whose
+        // identifier began with a hex letter.
+        #expect(url.deletingLastPathComponent().lastPathComponent == "ab")
+    }
+
+    @Test func everyShardNameSurvivesAServerThatLowerCasesDirectories() {
+        let root = URL(fileURLWithPath: "/Volumes/NAS/ShelfRowThumbnails", isDirectory: true)
+        for _ in 0..<64 {
+            let shard = ThumbnailDistribution.fileURL(forItemID: UUID(), in: root)
+                .deletingLastPathComponent().lastPathComponent
+            #expect(shard == shard.lowercased())
+            #expect(shard.count == 2)
+        }
     }
 
     @Test func aFolderIsRecognisedOnlyOnceItHasBeenInitialised() throws {

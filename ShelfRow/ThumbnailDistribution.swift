@@ -186,10 +186,19 @@ enum ThumbnailDistribution {
     /// Sharded on the first two characters of the identifier: twenty thousand
     /// files in one directory is slow to create into and slower to list over SMB,
     /// and 256 buckets brings it to about seventy-five files each.
+    ///
+    /// The shard is lower-cased. A share this was tried against lower-cases the
+    /// names of directories as it creates them, while resolving paths
+    /// case-sensitively — so asking for "0A" was answered first with "that
+    /// already exists" and then with "there is no such directory", and every
+    /// cover whose identifier began with a hex letter failed. Naming the shard
+    /// the way such a server will store it makes both answers agree, and costs
+    /// nothing anywhere else. The file keeps the identifier's own spelling, which
+    /// servers do preserve.
     static func fileURL(forItemID itemID: UUID, in root: URL) -> URL {
         let name = itemID.uuidString
         return root
-            .appendingPathComponent(String(name.prefix(2)), isDirectory: true)
+            .appendingPathComponent(String(name.prefix(2)).lowercased(), isDirectory: true)
             .appendingPathComponent("\(name).jpg", isDirectory: false)
     }
 

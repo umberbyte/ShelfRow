@@ -454,9 +454,19 @@ enum ThumbnailTransfer {
             group.cancelAll()
         }
 
-        let failed = results.filter { $0.errorCode != nil }.count
-        if failed > 0 {
-            logger.info("\(failed, privacy: .public) of \(results.count, privacy: .public) transfers did not complete")
+        let failures = results.compactMap(\.errorCode)
+        if !failures.isEmpty {
+            // With the reason. "11,686 of 11,686 did not complete" says a great
+            // deal less than the code that comes with it, and a run this size
+            // failing wholesale is exactly when the reason is wanted.
+            let byCode = Dictionary(grouping: failures, by: { $0 })
+                .map { "\($0.key)×\($0.value.count)" }
+                .sorted()
+                .joined(separator: ", ")
+            logger.error("""
+                \(failures.count, privacy: .public) of \(results.count, privacy: .public) transfers did not \
+                complete (error \(byCode, privacy: .public))
+                """)
         }
         return results
     }
