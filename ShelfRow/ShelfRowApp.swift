@@ -82,11 +82,20 @@ private enum SwiftDataStartupBackup {
 
 /// Implements the 環境設定 > 詳細設定 "メインウインドウを閉じると終了" behavior.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// The main content window, captured by `MainWindowTracker` so it can be told
-    /// apart from the 環境設定 (Settings) window.
-    private weak var mainWindow: NSWindow?
-    private var mainWindowCloseObserver: NSObjectProtocol?
-    private var isHandlingMainWindowClose = false
+    private var windowCloseObserver: NSObjectProtocol?
+    private var isHandlingWindowClose = false
+
+    /// AppKit's own identifier for the window a SwiftUI `Settings` scene creates.
+    /// Undocumented but stable since it first shipped, and the only way to pick
+    /// 環境設定 out of `NSApp.windows` without giving it a window of our own.
+    private static let settingsWindowIdentifier = "com_apple_SwiftUI_settings_window"
+    /// Fallback in case that identifier ever changes: the window titles macOS
+    /// gives a Settings scene by default.
+    private static let settingsWindowTitles: Set<String> = ["環境設定", "Settings", "Preferences"]
+
+    private static func isSettingsWindow(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue == settingsWindowIdentifier || settingsWindowTitles.contains(window.title)
+    }
 
     static var shouldTerminateWhenMainWindowCloses: Bool {
         // Default is ON (classic Stackroom behavior)
@@ -100,34 +109,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.shouldTerminateWhenMainWindowCloses
     }
 
-    /// Called once the main content window appears, so its close can be handled
-    /// specifically. AppKit only reports "last window closed" once every window is
-    /// gone, which never happens while 環境設定 stays open — leaving it stranded and
-    /// the app running instead of quitting.
-    func registerMainWindow(_ window: NSWindow) {
-        guard mainWindow !== window else { return }
-
-        if let mainWindowCloseObserver {
-            NotificationCenter.default.removeObserver(mainWindowCloseObserver)
-        }
-        mainWindow = window
-        mainWindowCloseObserver = NotificationCenter.default.addObserver(
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // AppKit only calls applicationShouldTerminateAfterLastWindowClosed once
+        // every window is gone, which never happens while 環境設定 stays open — the
+        // main window closing then leaves 環境設定 stranded instead of quitting.
+        // Watched by hand instead: any window closing is a chance to check whether
+        // only 環境設定 is left, which counts the same as the main window being the
+        // last one.
+        windowCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
-            object: window,
+            object: nil,
             queue: .main
         ) { [weak self] notification in
             guard let closedWindow = notification.object as? NSWindow else { return }
-            self?.mainWindowDidClose(closedWindow)
+            self?.windowDidClose(closedWindow)
         }
     }
 
-    private func mainWindowDidClose(_ closedWindow: NSWindow) {
-        guard !isHandlingMainWindowClose, Self.shouldTerminateWhenMainWindowCloses else { return }
-        isHandlingMainWindowClose = true
+    private func windowDidClose(_ closedWindow: NSWindow) {
+        guard !isHandlingWindowClose, Self.shouldTerminateWhenMainWindowCloses else { return }
+        // 環境設定 closing on its own is not "the main window closed".
+        guard !Self.isSettingsWindow(closedWindow) else { return }
 
-        // Close every other window (環境設定 chief among them) before quitting, so
-        // none of them are left open once the app has terminated.
-        for window in NSApp.windows where window !== closedWindow {
+        // Give AppKit a run-loop turn to finish tearing this window down before
+        // acting: closing other windows or calling terminate(_:) synchronously from
+        // inside a window's own will-close notification is unreliable — AppKit can
+        // end up ignoring it mid-teardown.
+        DispatchQueue.main.async { [weak self] in
+            self?.terminateIfOnlySettingsWindowRemains(after: closedWindow)
+        }
+    }
+
+    private func terminateIfOnlySettingsWindowRemains(after closedWindow: NSWindow) {
+        guard !isHandlingWindowClose else { return }
+
+        let remaining = NSApp.windows.filter { window in
+            window !== closedWindow && window.isVisible && !Self.isSettingsWindow(window)
+        }
+        guard remaining.isEmpty else { return }
+
+        isHandlingWindowClose = true
+        for window in NSApp.windows where Self.isSettingsWindow(window) {
             window.close()
         }
         NSApp.terminate(nil)
