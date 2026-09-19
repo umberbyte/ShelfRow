@@ -556,6 +556,8 @@ cloud モードのまま `modelContext.delete` でローカルのレコードを
 | `com.apple.developer.aps-environment` | `production` | サイレントプッシュ（これが無いと変更通知が届かず、取り込みが起動時・定期のみになる） |
 | （iPad）`UIBackgroundModes` | `remote-notification` | バックグラウンド取り込み |
 
+> **キー名の注意:** プッシュのエンタイトルメントは macOS では `com.apple.developer.aps-environment`。iOS の `aps-environment` を書いてもプロビジョニングプロファイルが付与しないため、署名時に無言で削除される。値は開発署名で `development`、Developer ID / App Store で `production` である必要があるので、ビルド設定 `APS_ENVIRONMENT` を Debug/Release で切り替えて `$(APS_ENVIRONMENT)` として参照する。
+
 ### 14.2 Developer ID 配布との関係
 - CloudKit は Developer ID 署名（App Store 外配布）でも利用できるが、**iCloud エンタイトルメント入りの Developer ID プロビジョニングプロファイル**が必要になる。自動署名（`signingStyle: automatic`）で `-allowProvisioningUpdates` を付けた現行のリリース手順（v1.1 で確立）が引き続き使える見込みだが、**Phase 1 の最初に Archive → Export → 公証まで通して確認する**。
 - 公証（notarytool）とステープルの手順は変更なし。
@@ -676,8 +678,8 @@ cloud モードのまま `modelContext.delete` でローカルのレコードを
 4. **`CloudKitEntitlement` を追加（設計になかった要素）。**
    `CKContainer(identifier:)` は、実行ファイルに一致するコンテナエンタイトルメントが無いとき**エラーを返さずトラップする**（`EXC_BREAKPOINT`）。署名なしのローカルビルドはこの状態になるため、起動直後に必ずクラッシュした。`SecTaskCopyValueForEntitlement` で権限の有無を確認してから CloudKit に触れるようにし、`LibraryStore.makeContainer` も cloud モード要求時に同じ確認をして `LibraryStoreError.cloudKitUnavailable` を投げる（→ ローカルへフォールバック）。
 
-5. **`aps-environment` が署名時に剥がされる。**
-   App ID に Push Notifications 機能が有効化されていないため、`ShelfRow.entitlements` に書いても署名済みバイナリには入らない。この状態でも同期自体は動くが、**CloudKit のサイレントプッシュが届かないため、他端末の変更の取り込みが起動時・フォアグラウンド復帰時などに限られる**（「意識せずとも最新」が弱まる）。Apple Developer の Identifiers で ShelfRow の App ID に Push Notifications を有効化すること。
+5. **プッシュのエンタイトルメントはキー名が違っていた（解決済み）。**
+   当初 iOS 用の `aps-environment` を書いていたため、プロファイルが付与するキー（macOS は `com.apple.developer.aps-environment`）と一致せず、署名時に無言で削除されていた。この状態ではサイレントプッシュが届かず、他端末の変更の取り込みが起動時などに限られる。キー名を修正し、値はビルド設定 `APS_ENVIRONMENT`（Debug = development / Release = production）から取るようにして、署名済みバイナリに入ることを確認した。
 
 ### 19.3 検証済み / 未検証
 

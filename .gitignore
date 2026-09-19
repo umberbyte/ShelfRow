@@ -7,6 +7,9 @@ xcuserdata/
 *.xcuserstate
 *.xcscmblueprint
 
+## Xcode Cloud writes this per-machine; nothing in the build depends on it
+**/xcshareddata/xcodecloud/
+
 ## Build products
 build/
 DerivedData/
