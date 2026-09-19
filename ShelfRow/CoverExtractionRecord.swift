@@ -9,23 +9,25 @@ import SwiftData
 
 /// What extracting a cover for one book concluded.
 enum CoverExtractionOutcome: String, Sendable {
-    /// A thumbnail was produced with the current heuristic.
+    /// A thumbnail was produced and written to the cache.
     case generated
     /// The file opened, but holds no page usable as a cover.
     case noUsableCover
+    /// The file could not be opened at all — volume unmounted, moved, deleted.
+    case unreachable
 }
 
-/// Bulk cover generation's record of what it has already concluded, per book.
+/// Bulk cover generation's record of the books it has already been run against.
 ///
-/// Extraction is deterministic, so without this the bulk pass keeps redoing its
-/// own work: a book whose best page really is a spread or a monochrome page
-/// produces a thumbnail that looks wrong by the very rules that asked for it, and
-/// a book with nothing usable inside produces no file at all, which reads as "not
-/// generated yet". Both would be re-read on every run, forever.
+/// A book is attempted once and then left alone, whatever came of it. Extraction
+/// is deterministic, so a second attempt re-reads the archive to reach the answer
+/// already stored here: the same spread or monochrome page that looks wrong by the
+/// very rules that asked for it, or the same nothing-usable-inside that leaves no
+/// file and so reads as "not generated yet".
 ///
 /// This table belongs to cover generation alone — nothing else in the app reads
-/// it. A book that could not be opened at all is deliberately never recorded:
-/// that answer can change by the next run.
+/// it. The outcome is kept per book so a run can report what happened, but the
+/// decision to skip only asks whether a record exists.
 @Model
 final class CoverExtractionRecord {
     @Attribute(.unique) var itemID: UUID
@@ -43,10 +45,15 @@ final class CoverExtractionRecord {
     }
 }
 
-/// The records as plain values, for the scan that runs off the model context.
-struct CoverExtractionStates: Sendable {
-    var generated: Set<UUID> = []
-    var withoutCover: Set<UUID> = []
+/// What one bulk run concluded, ready to be written back as records.
+struct CoverExtractionOutcomes: Sendable {
+    var generated: [UUID] = []
+    var withoutCover: [UUID] = []
+    var unreachable: [UUID] = []
+
+    var isEmpty: Bool {
+        generated.isEmpty && withoutCover.isEmpty && unreachable.isEmpty
+    }
 }
 
 /// Reads and writes `CoverExtractionRecord` off the main actor, so a library-sized
@@ -55,35 +62,26 @@ struct CoverExtractionStates: Sendable {
 actor CoverExtractionStore {
     private static let logger = Logger(subsystem: "jp.aromatics.ShelfRow", category: "CoverExtraction")
 
-    func states() -> CoverExtractionStates {
-        var states = CoverExtractionStates()
+    /// The books generation has already been run against, whatever came of it.
+    func attemptedItemIDs() -> Set<UUID> {
         do {
-            for record in try modelContext.fetch(FetchDescriptor<CoverExtractionRecord>()) {
-                switch record.outcome {
-                case .generated:
-                    states.generated.insert(record.itemID)
-                case .noUsableCover:
-                    states.withoutCover.insert(record.itemID)
-                case nil:
-                    continue
-                }
-            }
+            let records = try modelContext.fetch(FetchDescriptor<CoverExtractionRecord>())
+            Self.logger.info("Cover generation has \(records.count, privacy: .public) books on record")
+            return Set(records.map(\.itemID))
         } catch {
             Self.logger.error("Could not read cover extraction records: \(error.localizedDescription, privacy: .public)")
+            return []
         }
-        return states
     }
 
-    func record(generated: [UUID], withoutCover: [UUID]) {
-        guard !generated.isEmpty || !withoutCover.isEmpty else { return }
+    func record(_ outcomes: CoverExtractionOutcomes) {
+        guard !outcomes.isEmpty else { return }
 
         do {
             let existing = try modelContext.fetch(FetchDescriptor<CoverExtractionRecord>())
             var recordsByItemID = Dictionary(existing.map { ($0.itemID, $0) }, uniquingKeysWith: { first, _ in first })
             let now = Date()
 
-            // The latest conclusion replaces the previous one, so a book that has a
-            // cover now stops counting as one without a cover, and the other way round.
             func apply(_ itemIDs: [UUID], _ outcome: CoverExtractionOutcome) {
                 for itemID in itemIDs {
                     if let record = recordsByItemID[itemID] {
@@ -97,12 +95,24 @@ actor CoverExtractionStore {
                 }
             }
 
-            apply(generated, .generated)
-            apply(withoutCover, .noUsableCover)
+            apply(outcomes.generated, .generated)
+            apply(outcomes.withoutCover, .noUsableCover)
+            apply(outcomes.unreachable, .unreachable)
             try modelContext.save()
+
+            Self.logger.info("""
+                Recorded cover generation: \(outcomes.generated.count, privacy: .public) generated, \
+                \(outcomes.withoutCover.count, privacy: .public) without a usable cover, \
+                \(outcomes.unreachable.count, privacy: .public) unreachable
+                """)
         } catch {
             Self.logger.error("Could not save cover extraction records: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Marks one book as settled, for a cover chosen outside a bulk run.
+    func recordGenerated(_ itemID: UUID) {
+        record(CoverExtractionOutcomes(generated: [itemID]))
     }
 
     /// Drops records for books that are no longer in the library.
@@ -143,7 +153,7 @@ actor CoverExtractionStore {
 
         guard !generated.isEmpty || !withoutCover.isEmpty else { return }
 
-        record(generated: generated, withoutCover: withoutCover)
+        record(CoverExtractionOutcomes(generated: generated, withoutCover: withoutCover))
         try? FileManager.default.removeItem(at: generatedOnlyURL)
         try? FileManager.default.removeItem(at: outcomesURL)
     }

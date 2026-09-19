@@ -8,7 +8,10 @@
 import Cocoa
 import Foundation
 import ImageIO
+import OSLog
 import QuickLookThumbnailing
+
+private let thumbnailLogger = Logger(subsystem: "jp.aromatics.ShelfRow", category: "Thumbnails")
 
 @globalActor
 actor ThumbnailCacheActor {
@@ -271,12 +274,26 @@ final class ThumbnailCache {
             return (nil, true)
         }
 
+        // Only a thumbnail that reached the disk counts as generated: reporting
+        // success for one that did not leaves a book with no file and a record
+        // saying it has one.
         let localThumbnailURL = thumbnailCacheDirectory
             .appendingPathComponent("\(request.itemID.uuidString).jpg")
-        if let tiff = thumbnail.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff),
-           let jpegData = bitmap.representation(using: .jpeg, properties: [:]) {
-            try? jpegData.write(to: localThumbnailURL, options: .atomic)
+        guard let tiff = thumbnail.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let jpegData = bitmap.representation(using: .jpeg, properties: [:]) else {
+            thumbnailLogger.error("Could not encode a thumbnail for \(request.itemID.uuidString, privacy: .public)")
+            return (nil, true)
+        }
+
+        do {
+            try jpegData.write(to: localThumbnailURL, options: .atomic)
+        } catch {
+            thumbnailLogger.error("""
+                Could not write the thumbnail for \(request.itemID.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return (nil, true)
         }
 
         return (thumbnail, true)
@@ -291,13 +308,11 @@ final class ThumbnailCache {
     nonisolated static func generateThumbnails(
         for requests: [ThumbnailRequest],
         progress: @escaping @MainActor (Int) -> Void
-    ) async -> (generated: [UUID], withoutCover: [UUID], unreachable: Int) {
-        guard !requests.isEmpty else { return ([], [], 0) }
+    ) async -> CoverExtractionOutcomes {
+        guard !requests.isEmpty else { return CoverExtractionOutcomes() }
 
         let width = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8))
-        var generated: [UUID] = []
-        var withoutCover: [UUID] = []
-        var unreachable = 0
+        var outcomes = CoverExtractionOutcomes()
         var completed = 0
 
         await withTaskGroup(of: (itemID: UUID, succeeded: Bool, reachable: Bool).self) { group in
@@ -312,11 +327,11 @@ final class ThumbnailCache {
 
             while let result = await group.next() {
                 if result.succeeded {
-                    generated.append(result.itemID)
+                    outcomes.generated.append(result.itemID)
                 } else if result.reachable {
-                    withoutCover.append(result.itemID)
+                    outcomes.withoutCover.append(result.itemID)
                 } else {
-                    unreachable += 1
+                    outcomes.unreachable.append(result.itemID)
                 }
 
                 completed += 1
@@ -334,7 +349,7 @@ final class ThumbnailCache {
             }
         }
 
-        return (generated, withoutCover, unreachable)
+        return outcomes
     }
 
     /// Scale down raw image data to a high-quality thumbnail using CGImageSource.

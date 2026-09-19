@@ -2501,13 +2501,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             // table and read by nothing else.
             let store = CoverExtractionStore(modelContainer: modelContext.container)
             await store.importLegacyLogs()
-            let states = await store.states()
+            let alreadyAttempted = await store.attemptedItemIDs()
 
             let scanResult = await Task.detached(priority: .userInitiated) {
                 await Self.scanThumbnailRepairTargets(
                     itemIDs: itemIDs,
                     cacheDir: cacheDir,
-                    states: states
+                    alreadyAttempted: alreadyAttempted
                 )
             }.value
 
@@ -2525,11 +2525,10 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 processedBooks = completed
             }
 
-            // Record what the current heuristic has now been run against, so a
-            // second pass does not re-read these archives to reach the same answer.
-            // Books that could not be opened at all are left out: that can change
-            // by the next run, so they stay on the list.
-            await store.record(generated: outcome.generated, withoutCover: outcome.withoutCover)
+            // Every book this run touched is now settled, whatever came of it, so
+            // the next run starts from what is on record instead of opening the
+            // same archives again.
+            await store.record(outcome)
             await store.prune(keeping: Set(itemIDs))
 
             // Items whose cover failed to load earlier in the session are
@@ -2539,7 +2538,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
             isImporting = false
             processedBooks = totalBooks
-            importMessage = "サムネイルの一括生成が完了しました。\n\n・そのまま使用（スキップ）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated.count)件\n・使える表紙が無い: \(outcome.withoutCover.count)件\n・ファイルを開けず（未接続など）: \(outcome.unreachable)件"
+            importMessage = "サムネイルの一括生成が完了しました。\n\n・対象外（処理済み・問題なし）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated.count)件\n・使える表紙が無い: \(outcome.withoutCover.count)件\n・ファイルを開けず（未接続など）: \(outcome.unreachable.count)件"
             showImportResult = true
             NotificationCenter.default.post(name: .coverDidChange, object: nil)
         }
@@ -2548,7 +2547,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     nonisolated private static func scanThumbnailRepairTargets(
         itemIDs: [UUID],
         cacheDir: URL,
-        states: CoverExtractionStates
+        alreadyAttempted: Set<UUID>
     ) async -> ThumbnailRepairScanResult {
         guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
 
@@ -2562,12 +2561,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 group.addTask(priority: .utility) {
                     var result = ThumbnailRepairScanResult()
                     for itemID in chunk {
+                        // Attempted once, left alone from then on: a second pass
+                        // would re-read the archive to reach the answer already on
+                        // record.
+                        guard !alreadyAttempted.contains(itemID) else { continue }
+
                         let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
-                        guard let reasons = thumbnailRepairReasons(
-                            at: thumbURL,
-                            alreadyGenerated: states.generated.contains(itemID),
-                            knownToHaveNoCover: states.withoutCover.contains(itemID)
-                        ) else { continue }
+                        guard let reasons = thumbnailRepairReasons(at: thumbURL) else { continue }
                         result.itemIDs.append(itemID)
                         if reasons.isMonochrome {
                             result.monochromeCount += 1
@@ -2593,31 +2593,22 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
     /// Why a cover has to be generated, or nil to leave the thumbnail alone.
     ///
-    /// A landscape thumbnail is usually a spread picked by mistake, and a
-    /// monochrome one usually an inside page rather than the cover, so both are
-    /// worth re-picking — but only once. Extraction is deterministic: for a book
-    /// whose best page really is a spread or monochrome, a second pass re-reads the
-    /// archive to produce the very same image and flags it again on the next run.
-    /// So a cover this app has already extracted is judged on whether it is there,
-    /// not on how good a pick it was. A good portrait cover is never re-extracted
-    /// either way.
+    /// Only asked about books generation has not been run against yet — see
+    /// `CoverExtractionRecord` for why it is asked once and not again. A landscape
+    /// thumbnail is usually a spread picked by mistake, and a monochrome one
+    /// usually an inside page rather than the cover; a good portrait cover is left
+    /// as it is.
     nonisolated static func thumbnailRepairReasons(
-        at thumbURL: URL,
-        alreadyGenerated: Bool,
-        knownToHaveNoCover: Bool
+        at thumbURL: URL
     ) -> (isMonochrome: Bool, isLandscape: Bool, isMissing: Bool)? {
         // Nothing there yet, an empty file from an interrupted write, or an image
-        // that cannot be read back: generate it — unless opening this book has
-        // already shown there is no page inside to use, which is why it has no
-        // thumbnail in the first place.
+        // that cannot be read back: generate it.
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: thumbURL.path),
               let byteSize = attributes[.size] as? Int,
               byteSize > 0,
               let size = CoverSelector.imagePixelSize(at: thumbURL) else {
-            return knownToHaveNoCover ? nil : (isMonochrome: false, isLandscape: false, isMissing: true)
+            return (isMonochrome: false, isLandscape: false, isMissing: true)
         }
-
-        guard !alreadyGenerated else { return nil }
 
         if size.width > size.height {
             return (isMonochrome: false, isLandscape: true, isMissing: false)

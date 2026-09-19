@@ -233,28 +233,12 @@ struct ShelfRowTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let reasons = try #require(ContentView.thumbnailRepairReasons(
-            at: directory.appendingPathComponent("absent.jpg"),
-            alreadyGenerated: false,
-            knownToHaveNoCover: false
+            at: directory.appendingPathComponent("absent.jpg")
         ))
 
         #expect(reasons.isMissing)
         #expect(!reasons.isLandscape)
         #expect(!reasons.isMonochrome)
-    }
-
-    @Test func bulkGenerationRegeneratesAThumbnailItGeneratedIfTheFileIsGone() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let reasons = try #require(ContentView.thumbnailRepairReasons(
-            at: directory.appendingPathComponent("absent.jpg"),
-            alreadyGenerated: true,
-            knownToHaveNoCover: false
-        ))
-
-        #expect(reasons.isMissing)
     }
 
     @Test func bulkGenerationTargetsAnEmptyThumbnailFile() throws {
@@ -265,7 +249,7 @@ struct ShelfRowTests {
         let thumbURL = directory.appendingPathComponent("truncated.jpg")
         try Data().write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
 
         #expect(reasons.isMissing)
     }
@@ -279,28 +263,40 @@ struct ShelfRowTests {
         try makeTestImage(width: 80, height: 40, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
             .write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
 
         #expect(reasons.isLandscape)
         #expect(!reasons.isMissing)
     }
 
-    @Test func coverExtractionStoreKeepsTheLatestOutcomePerBook() async throws {
+    @Test func everyBookARunTouchedCountsAsAttempted() async throws {
         let store = try makeCoverExtractionStore()
         let generated = UUID()
-        let hopeless = UUID()
+        let withoutCover = UUID()
+        let unreachable = UUID()
 
-        await store.record(generated: [generated], withoutCover: [hopeless])
-        var states = await store.states()
-        #expect(states.generated == [generated])
-        #expect(states.withoutCover == [hopeless])
+        // Whatever came of it, a book is attempted once: an unmounted volume is on
+        // record the same as a cover that was produced, so the next run leaves all
+        // three alone.
+        await store.record(CoverExtractionOutcomes(
+            generated: [generated],
+            withoutCover: [withoutCover],
+            unreachable: [unreachable]
+        ))
 
-        // The book that had nothing usable now has a cover: it must stop counting
-        // as one without a cover, rather than appearing in both.
-        await store.record(generated: [hopeless], withoutCover: [])
-        states = await store.states()
-        #expect(states.generated == [generated, hopeless])
-        #expect(states.withoutCover.isEmpty)
+        let attempted = await store.attemptedItemIDs()
+        #expect(attempted == [generated, withoutCover, unreachable])
+    }
+
+    @Test func coverExtractionStoreKeepsTheLatestOutcomePerBook() async throws {
+        let store = try makeCoverExtractionStore()
+        let book = UUID()
+
+        await store.record(CoverExtractionOutcomes(withoutCover: [book]))
+        await store.record(CoverExtractionOutcomes(generated: [book]))
+
+        let attempted = await store.attemptedItemIDs()
+        #expect(attempted == [book])
     }
 
     @Test func coverExtractionStoreForgetsBooksNoLongerInTheLibrary() async throws {
@@ -308,11 +304,11 @@ struct ShelfRowTests {
         let kept = UUID()
         let deleted = UUID()
 
-        await store.record(generated: [kept, deleted], withoutCover: [])
+        await store.record(CoverExtractionOutcomes(generated: [kept, deleted]))
         await store.prune(keeping: [kept])
 
-        let states = await store.states()
-        #expect(states.generated == [kept])
+        let attempted = await store.attemptedItemIDs()
+        #expect(attempted == [kept])
     }
 
     private func makeCoverExtractionStore() throws -> CoverExtractionStore {
@@ -321,39 +317,6 @@ struct ShelfRowTests {
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         return CoverExtractionStore(modelContainer: container)
-    }
-
-    @Test func bulkGenerationStopsRetryingABookWithNoUsableCover() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        // Opening the book produced no thumbnail, so there is no file — but the
-        // reason is inside the book, and a second run would find the same thing.
-        #expect(ContentView.thumbnailRepairReasons(
-            at: directory.appendingPathComponent("absent.jpg"),
-            alreadyGenerated: false,
-            knownToHaveNoCover: true
-        ) == nil)
-    }
-
-    @Test func bulkGenerationLeavesACoverItAlreadyExtractedAlone() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        // A book whose best page really is a spread, or is monochrome throughout:
-        // re-extracting produces this same image, so a second run must not pick it
-        // up again.
-        let spread = directory.appendingPathComponent("landscape.jpg")
-        try makeTestImage(width: 80, height: 40, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
-            .write(to: spread)
-        let monochrome = directory.appendingPathComponent("monochrome.png")
-        try makeTestImage(width: 40, height: 80, color: CGColor(gray: 0.5, alpha: 1), type: .png)
-            .write(to: monochrome)
-
-        #expect(ContentView.thumbnailRepairReasons(at: spread, alreadyGenerated: true, knownToHaveNoCover: false) == nil)
-        #expect(ContentView.thumbnailRepairReasons(at: monochrome, alreadyGenerated: true, knownToHaveNoCover: false) == nil)
     }
 
     @Test func bulkGenerationRepicksAMonochromeThumbnailThatIsAlreadyOnDisk() throws {
@@ -365,7 +328,7 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(gray: 0.5, alpha: 1), type: .png)
             .write(to: thumbURL)
 
-        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false))
+        let reasons = try #require(ContentView.thumbnailRepairReasons(at: thumbURL))
 
         #expect(reasons.isMonochrome)
         #expect(!reasons.isMissing)
@@ -380,7 +343,7 @@ struct ShelfRowTests {
         try makeTestImage(width: 40, height: 80, color: CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1), type: .jpeg)
             .write(to: thumbURL)
 
-        #expect(ContentView.thumbnailRepairReasons(at: thumbURL, alreadyGenerated: false, knownToHaveNoCover: false) == nil)
+        #expect(ContentView.thumbnailRepairReasons(at: thumbURL) == nil)
     }
 
     @Test func coverPrefetchWindowIsEmptyWithoutNeighborsToLoad() {

@@ -193,7 +193,7 @@ struct CoverEditorView: View {
                 // A cover picked by hand is settled: bulk generation must not decide
                 // it looks like the wrong page and replace it.
                 let store = CoverExtractionStore(modelContainer: modelContext.container)
-                await store.record(generated: [itemID], withoutCover: [])
+                await store.recordGenerated(itemID)
 
                 NotificationCenter.default.post(name: .coverDidChange, object: itemID)
             }
