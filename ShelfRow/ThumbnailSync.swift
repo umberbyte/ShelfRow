@@ -66,27 +66,64 @@ actor CoverDistributionStore {
         ThumbnailCache.diskCacheDirectory.appendingPathComponent("\(itemID.uuidString).jpg")
     }
 
+    /// Every thumbnail on disk and its size, from one directory listing.
+    ///
+    /// Asking the file system about each book in turn is twenty thousand system
+    /// calls for an answer one enumeration already holds. On a library this size
+    /// that difference is the difference between a pause and a freeze.
+    private static func cacheInventory() -> [UUID: Int] {
+        let keys: [URLResourceKey] = [.fileSizeKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: ThumbnailCache.diskCacheDirectory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else { return [:] }
+
+        var inventory: [UUID: Int] = [:]
+        inventory.reserveCapacity(files.count)
+        for file in files where file.pathExtension == "jpg" {
+            guard let itemID = UUID(uuidString: file.deletingPathExtension().lastPathComponent) else { continue }
+            inventory[itemID] = (try? file.resourceValues(forKeys: Set(keys)))?.fileSize ?? 0
+        }
+        return inventory
+    }
+
+    /// The parts of a book this bookkeeping needs, without materialising the rest
+    /// of it. A library-sized fetch of whole records is most of the cost here.
+    private struct CoverFacts {
+        let id: UUID
+        let coverVersion: Int
+        let coverBytes: Int
+    }
+
+    private func coverFacts() throws -> [CoverFacts] {
+        var descriptor = FetchDescriptor<Item>()
+        descriptor.propertiesToFetch = [\.id, \.coverVersion, \.coverBytes]
+        return try modelContext.fetch(descriptor).map {
+            CoverFacts(id: $0.id, coverVersion: $0.coverVersion, coverBytes: $0.coverBytes)
+        }
+    }
+
     /// The books whose thumbnail this device should fetch.
     func fetchTargets() throws -> [CoverFetchTarget] {
         let states = try statesByItemID()
-        let fileManager = FileManager.default
+        let inventory = Self.cacheInventory()
 
-        return try modelContext.fetch(FetchDescriptor<Item>()).compactMap { item in
-            guard item.coverVersion > 0 else { return nil }
-            let state = states[item.id]
+        return try coverFacts().compactMap { book in
+            guard book.coverVersion > 0 else { return nil }
+            let state = states[book.id]
 
             // A version this device has already tried three times is left alone
             // until the library moves on to a new one.
-            if let state, state.attempts >= Self.maxAttempts, state.version < item.coverVersion,
+            if let state, state.attempts >= Self.maxAttempts, state.version < book.coverVersion,
                state.lastErrorCode != 0 {
                 return nil
             }
 
-            let hasCurrentVersion = state?.version == item.coverVersion
-            let hasFile = fileManager.fileExists(atPath: cacheFileURL(item.id).path)
-            guard !hasCurrentVersion || !hasFile else { return nil }
+            let hasCurrentVersion = state?.version == book.coverVersion
+            guard !hasCurrentVersion || inventory[book.id] == nil else { return nil }
 
-            return CoverFetchTarget(itemID: item.id, version: item.coverVersion, expectedBytes: item.coverBytes)
+            return CoverFetchTarget(itemID: book.id, version: book.coverVersion, expectedBytes: book.coverBytes)
         }
     }
 
@@ -96,17 +133,17 @@ actor CoverDistributionStore {
     /// (`coverVersion == 0`), and one generated while the NAS was out of reach.
     func uploadTargets() throws -> [CoverUploadTarget] {
         let states = try statesByItemID()
-        let fileManager = FileManager.default
+        let inventory = Self.cacheInventory()
 
-        return try modelContext.fetch(FetchDescriptor<Item>()).compactMap { item in
-            guard fileManager.fileExists(atPath: cacheFileURL(item.id).path) else { return nil }
-            let state = states[item.id]
+        return try coverFacts().compactMap { book in
+            guard inventory[book.id] != nil else { return nil }
+            let state = states[book.id]
 
-            if item.coverVersion == 0 {
-                return CoverUploadTarget(itemID: item.id, version: 1)
+            if book.coverVersion == 0 {
+                return CoverUploadTarget(itemID: book.id, version: 1)
             }
             if state?.pendingUpload == true {
-                return CoverUploadTarget(itemID: item.id, version: item.coverVersion)
+                return CoverUploadTarget(itemID: book.id, version: book.coverVersion)
             }
             return nil
         }
@@ -114,20 +151,20 @@ actor CoverDistributionStore {
 
     func counts() throws -> CoverDistributionCounts {
         let states = try statesByItemID()
-        let fileManager = FileManager.default
+        let inventory = Self.cacheInventory()
         var counts = CoverDistributionCounts()
 
-        for item in try modelContext.fetch(FetchDescriptor<Item>()) {
-            let state = states[item.id]
-            let hasFile = fileManager.fileExists(atPath: cacheFileURL(item.id).path)
+        for book in try coverFacts() {
+            let state = states[book.id]
+            let hasFile = inventory[book.id] != nil
 
-            if item.coverVersion == 0 {
+            if book.coverVersion == 0 {
                 if hasFile { counts.toUpload += 1 }
                 continue
             }
             if state?.pendingUpload == true { counts.toUpload += 1 }
 
-            if state?.version == item.coverVersion, hasFile {
+            if state?.version == book.coverVersion, hasFile {
                 counts.held += 1
             } else if let state, state.attempts >= Self.maxAttempts, state.lastErrorCode != 0 {
                 counts.failed += 1
@@ -138,11 +175,16 @@ actor CoverDistributionStore {
         return counts
     }
 
+    /// How many rows are written before a save. A library-sized run held in one
+    /// transaction is a long stall at the end and a lot of memory until then.
+    private static let writeChunk = 500
+
     /// Records what came of fetching a batch.
     func recordFetched(_ results: [CoverFetchResult]) {
         guard !results.isEmpty else { return }
         do {
             let states = try statesByItemID()
+            var sinceSave = 0
             for result in results {
                 let state = states[result.itemID] ?? {
                     let fresh = LocalCoverState(itemID: result.itemID)
@@ -160,6 +202,12 @@ actor CoverDistributionStore {
                     state.lastErrorCode = 0
                 }
                 state.updatedAt = Date()
+
+                sinceSave += 1
+                if sinceSave >= Self.writeChunk {
+                    try modelContext.save()
+                    sinceSave = 0
+                }
             }
             try modelContext.save()
         } catch {
@@ -173,10 +221,14 @@ actor CoverDistributionStore {
         guard !uploaded.isEmpty else { return }
         do {
             let states = try statesByItemID()
+            // Whole records this time: their version is what has to change, and
+            // that is the number every other device reads to know there is
+            // something to fetch.
             let items = Dictionary(
                 try modelContext.fetch(FetchDescriptor<Item>()).map { ($0.id, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
+            var sinceSave = 0
 
             for result in uploaded {
                 let state = states[result.itemID] ?? {
@@ -204,6 +256,12 @@ actor CoverDistributionStore {
                 state.attempts = 0
                 state.lastErrorCode = 0
                 state.updatedAt = Date()
+
+                sinceSave += 1
+                if sinceSave >= Self.writeChunk {
+                    try modelContext.save()
+                    sinceSave = 0
+                }
             }
             try modelContext.save()
         } catch {
@@ -223,23 +281,20 @@ actor CoverDistributionStore {
     func adoptLocalFiles() -> Int {
         do {
             let states = try statesByItemID()
-            let fileManager = FileManager.default
+            let inventory = Self.cacheInventory()
             var adopted = 0
 
-            for item in try modelContext.fetch(FetchDescriptor<Item>()) {
-                guard item.coverVersion > 0, states[item.id]?.version != item.coverVersion else { continue }
-                let file = cacheFileURL(item.id)
-                guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
-                      let bytes = attributes[.size] as? Int,
-                      bytes > 0,
-                      item.coverBytes == 0 || bytes == item.coverBytes else { continue }
+            for book in try coverFacts() {
+                guard book.coverVersion > 0, states[book.id]?.version != book.coverVersion else { continue }
+                guard let bytes = inventory[book.id], bytes > 0,
+                      book.coverBytes == 0 || bytes == book.coverBytes else { continue }
 
-                let state = states[item.id] ?? {
-                    let fresh = LocalCoverState(itemID: item.id)
+                let state = states[book.id] ?? {
+                    let fresh = LocalCoverState(itemID: book.id)
                     modelContext.insert(fresh)
                     return fresh
                 }()
-                state.version = item.coverVersion
+                state.version = book.coverVersion
                 state.bytes = bytes
                 state.attempts = 0
                 state.lastErrorCode = 0
@@ -261,7 +316,7 @@ actor CoverDistributionStore {
     /// library it describes.
     func forgetOrphanedStates() {
         do {
-            let live = Set(try modelContext.fetch(FetchDescriptor<Item>()).map(\.id))
+            let live = Set(try coverFacts().map(\.id))
             var removed = 0
             for state in try modelContext.fetch(FetchDescriptor<LocalCoverState>()) where !live.contains(state.itemID) {
                 modelContext.delete(state)
@@ -346,6 +401,19 @@ enum ThumbnailTransfer {
         }
     }
 
+    /// The lane these transfers run on.
+    ///
+    /// Reading and writing files is blocking work, and a blocked thread in Swift's
+    /// cooperative pool is one the rest of the app cannot have. That pool holds
+    /// about as many threads as the machine has cores, so six transfers waiting on
+    /// a share at once is most of it — everything else in the app, the scrolling
+    /// included, waits behind them. A queue of its own keeps the waiting here.
+    private static let transferQueue = DispatchQueue(
+        label: "\(ThumbnailCache.appIdentifier).thumbnail-transfer",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
     /// Keeps `concurrency` transfers in flight until the list is done.
     private static func run<Target: Sendable>(
         _ targets: [Target],
@@ -359,10 +427,17 @@ enum ThumbnailTransfer {
         results.reserveCapacity(targets.count)
 
         await withTaskGroup(of: CoverFetchResult.self) { group in
+            func enqueue(_ target: Target) {
+                group.addTask {
+                    await withCheckedContinuation { continuation in
+                        transferQueue.async { continuation.resume(returning: transfer(target)) }
+                    }
+                }
+            }
+
             var next = 0
             for _ in 0..<min(width, targets.count) {
-                let target = targets[next]
-                group.addTask { transfer(target) }
+                enqueue(targets[next])
                 next += 1
             }
 
@@ -371,8 +446,7 @@ enum ThumbnailTransfer {
                 onProgress(results.count)
                 if Task.isCancelled { break }
                 if next < targets.count {
-                    let target = targets[next]
-                    group.addTask { transfer(target) }
+                    enqueue(targets[next])
                     next += 1
                 }
             }

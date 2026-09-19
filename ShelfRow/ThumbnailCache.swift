@@ -27,12 +27,18 @@ struct ThumbnailRequest: Sendable, Hashable {
     let volumeBookmark: Data?
     let volumeLastKnownPath: String
     let relativePath: String
+    /// Which version of this book's cover the library knows of, or 0 for none.
+    /// Carried so generation can tell whether the distribution folder could
+    /// possibly hold one: asking about a cover nobody has published is a network
+    /// round trip spent to be told no.
+    let coverVersion: Int
 
     @MainActor
     init(item: Item) {
         let vault = BookmarkVault.shared
         self.itemID = item.id
         self.legacyID = item.legacyID
+        self.coverVersion = item.coverVersion
         self.itemBookmark = vault.bookmark(for: item.id)
         self.volumeBookmark = item.volume.flatMap { vault.bookmark(for: $0.id) }
         self.volumeLastKnownPath = item.volume?.lastKnownPath ?? ""
@@ -259,8 +265,11 @@ final class ThumbnailCache {
     ) -> (image: NSImage?, fileWasReachable: Bool) {
         // Another Mac may have done this already. Copying its answer off the
         // share costs one small read; opening the archive costs a decompression
-        // and a pass over the pages to pick a cover.
-        if let fromDistribution = thumbnailFromDistributionFolder(forItemID: request.itemID) {
+        // and a pass over the pages to pick a cover. Only worth asking when the
+        // library says a cover exists — over a share, being told no is as slow as
+        // being told yes, and a bulk run would ask twenty thousand times.
+        if request.coverVersion > 0,
+           let fromDistribution = thumbnailFromDistributionFolder(forItemID: request.itemID) {
             return (fromDistribution, true)
         }
 

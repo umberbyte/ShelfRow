@@ -132,15 +132,13 @@ final class ThumbnailDistributionCoordinator {
     /// Called once the library store is open, and again after it is reopened in a
     /// different mode.
     func attach(to container: ModelContainer, mode: LibraryMode) {
-        let store = CoverDistributionStore(modelContainer: container)
-        self.store = store
+        store = CoverDistributionStore(modelContainer: container)
         libraryMode = mode
         resolveRoot()
-        Task {
-            await store.adoptLocalFiles()
-            await store.forgetOrphanedStates()
-            await refreshCounts()
-        }
+        // Nothing is read or counted here. Every one of those passes walks the
+        // whole library, and launch is the worst moment to spend that — most of
+        // the time there is no folder to distribute through at all, and when
+        // there is, the pass a few seconds later does the work anyway.
     }
 
     /// Whether this device has ever been offered a bulk fetch, which is what makes
@@ -262,8 +260,13 @@ final class ThumbnailDistributionCoordinator {
 
     // MARK: - Counting
 
+    /// Counting walks the library, so it happens when someone is looking at the
+    /// numbers or a run has just changed them — never on a timer.
     func refreshCounts() async {
-        guard let store else { return }
+        guard let store, isActive else {
+            counts = nil
+            return
+        }
         counts = try? await store.counts()
     }
 
@@ -309,7 +312,6 @@ final class ThumbnailDistributionCoordinator {
     /// Fetches everything this device is missing.
     func fetchEverything() {
         start(.fetching) { [self] store, root, report in
-            await store.adoptLocalFiles()
             guard let targets = try? await store.fetchTargets(), !targets.isEmpty else {
                 return "取得するサムネイルはありませんでした。"
             }
@@ -349,6 +351,9 @@ final class ThumbnailDistributionCoordinator {
         // library-sized registration, which has its own button: a run of that
         // size here would mean two Macs had generated the same twenty thousand
         // covers, which the rules above are there to prevent.
+        await store.adoptLocalFiles()
+        await store.forgetOrphanedStates()
+
         if let uploads = try? await store.uploadTargets(),
            !uploads.isEmpty,
            uploads.count <= Self.quietUploadCount {
