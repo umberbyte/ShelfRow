@@ -1265,19 +1265,6 @@ struct MaintenanceSettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The shape of the thumbnail panel's rows.
-    ///
-    /// One set of numbers for all three rows, so the explanations line up on both
-    /// sides instead of each row ending wherever its own text runs out. The
-    /// trailing gutter is what stops the text from reaching the panel's edge, and
-    /// it is also where the stepper goes: the same band of space, used twice.
-    private enum ThumbnailPanelLayout {
-        static let controlColumn: CGFloat = 240
-        static let columnGap: CGFloat = 18
-        static let leadingInset: CGFloat = 6
-        static let trailingGutter: CGFloat = 96
-    }
-
     /// The NAS folder thumbnails are handed around through.
     ///
     /// Covers are not sent to iCloud — they are copyrighted artwork, and a
@@ -1347,7 +1334,7 @@ struct MaintenanceSettingsView: View {
                         取得済み \(counts.held.formatted())件 / 未取得 \(counts.missing.formatted())件 \
                         / 未登録 \(counts.toUpload.formatted())件\(counts.failed > 0 ? " / 失敗 \(counts.failed.formatted())件" : "")
                         """)
-                        .font(PreferencesLayout.smallCaptionFont)
+                        .font(PreferencesLayout.captionFont)
                         .foregroundStyle(.secondary)
                 }
 
@@ -1365,11 +1352,11 @@ struct MaintenanceSettingsView: View {
                             .controlSize(.large)
                     }
                 } else {
-                    HStack(alignment: .top, spacing: ThumbnailPanelLayout.columnGap) {
+                    HStack(alignment: .top, spacing: 18) {
                         Button("配布元からサムネイルを取得") { thumbnails.fetchEverything() }
                             .controlSize(.large)
                             .disabled(!thumbnails.isActive)
-                            .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
+                            .frame(width: 240, alignment: .leading)
 
                         Text("この端末に無いサムネイルを配布元から取り込みます。中断しても、次回は残りだけが対象になります。")
                             .font(PreferencesLayout.captionFont)
@@ -1378,18 +1365,16 @@ struct MaintenanceSettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.leading, ThumbnailPanelLayout.leadingInset)
-                    .padding(.trailing, ThumbnailPanelLayout.trailingGutter)
 
                     // Filling the folder is the first device's job: two Macs
                     // extracting the same twenty thousand archives would only
                     // spend the NAS twice over.
                     if !libraryStore.isReplica {
-                        HStack(alignment: .top, spacing: ThumbnailPanelLayout.columnGap) {
+                        HStack(alignment: .top, spacing: 18) {
                             Button("サムネイルを配布元へ登録") { thumbnails.uploadEverything() }
                                 .controlSize(.large)
                                 .disabled(!thumbnails.isActive)
-                                .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
+                                .frame(width: 240, alignment: .leading)
 
                             Text("この端末が持っているサムネイルを配布元へコピーし、他の端末が取得できるようにします。iCloudは経由しないため、同期には影響しません。")
                                 .font(PreferencesLayout.captionFont)
@@ -1398,8 +1383,6 @@ struct MaintenanceSettingsView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(.leading, ThumbnailPanelLayout.leadingInset)
-                        .padding(.trailing, ThumbnailPanelLayout.trailingGutter)
                     }
                 }
 
@@ -1407,7 +1390,7 @@ struct MaintenanceSettingsView: View {
                 // the left, level with the buttons, and the explanation beside it.
                 // Sitting after the text instead left it floating against the
                 // middle of a paragraph, belonging to neither column.
-                HStack(alignment: .top, spacing: ThumbnailPanelLayout.columnGap) {
+                HStack(alignment: .top, spacing: 18) {
                     HStack(spacing: 10) {
                         Text("同時転送数")
                             .font(PreferencesLayout.bodyFont)
@@ -1422,7 +1405,7 @@ struct MaintenanceSettingsView: View {
                         .disabled(thumbnails.isRunning)
                         .fixedSize()
                     }
-                    .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
+                    .frame(width: 240, alignment: .leading)
 
                     Text("小さなファイルの転送は待ち時間が支配的なので、数本並べた方が速くなります。NASの反応が鈍るなら下げてください。")
                         .font(PreferencesLayout.captionFont)
@@ -1431,16 +1414,16 @@ struct MaintenanceSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.leading, ThumbnailPanelLayout.leadingInset)
-                .padding(.trailing, ThumbnailPanelLayout.trailingGutter)
 
                 if let message = thumbnails.lastMessage {
                     Text(message)
-                        .font(PreferencesLayout.smallCaptionFont)
+                        .font(PreferencesLayout.captionFont)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await thumbnails.refreshCounts() }
     }
