@@ -94,6 +94,7 @@ final class LibraryStore {
         }
 
         UserDefaults.standard.set(mode.rawValue, forKey: DefaultsKey.lastMode)
+        Self.logger.info("Opened the library in \(self.mode.rawValue, privacy: .public) mode")
         BookmarkVault.shared.attach(to: container)
         BookmarkVault.shared.adoptBookmarksStoredOnModels()
     }

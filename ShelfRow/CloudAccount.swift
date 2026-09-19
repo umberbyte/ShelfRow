@@ -65,6 +65,36 @@ final class CloudAccountMonitor {
     private(set) var userRecordName: String?
     private(set) var lastSyncDate: Date?
     private(set) var lastSyncErrorMessage: String?
+    /// When CloudKit asked us to back off. Seeding a large library earns this
+    /// routinely — the framework waits and carries on by itself, so it is a
+    /// state to report, not a failure to warn about.
+    private(set) var throttledUntil: Date?
+
+    var isThrottled: Bool {
+        guard let throttledUntil else { return false }
+        return throttledUntil > Date()
+    }
+
+    /// Completed export/import rounds since the app launched. CloudKit does not
+    /// publish how many records a round carried, nor how many are left, so this
+    /// counts activity rather than progress — enough to show that seeding is
+    /// moving, not enough to put a percentage on it.
+    private(set) var syncRoundsCompleted = 0
+    private(set) var syncStartedAt: Date?
+
+    /// Rounds arrive every few seconds while a large library is being seeded, so
+    /// a gap this long means it has settled.
+    private static let settledAfter: TimeInterval = 90
+
+    var isSyncing: Bool {
+        if isThrottled { return true }
+        guard let lastSyncDate else { return false }
+        return Date().timeIntervalSince(lastSyncDate) < Self.settledAfter
+    }
+
+    var syncElapsed: TimeInterval? {
+        syncStartedAt.map { Date().timeIntervalSince($0) }
+    }
 
     /// Held for the lifetime of the app — the monitor is created once by the
     /// `App` and never torn down, so there is no point at which to unregister.
@@ -103,9 +133,11 @@ final class CloudAccountMonitor {
                     as? NSPersistentCloudKitContainer.Event,
                   event.endDate != nil else { return }
             let succeeded = event.succeeded
-            let message = event.error?.localizedDescription
+            let error = event.error as? NSError
+            let message = error?.localizedDescription
+            let retryAfter = Self.retryInterval(for: error)
             MainActor.assumeIsolated {
-                self?.recordSyncEvent(succeeded: succeeded, errorMessage: message)
+                self?.recordSyncEvent(succeeded: succeeded, errorMessage: message, retryAfter: retryAfter)
             }
         })
 
@@ -157,10 +189,60 @@ final class CloudAccountMonitor {
         }
     }
 
-    private func recordSyncEvent(succeeded: Bool, errorMessage: String?) {
+    /// How long CloudKit wants us to wait, for the errors it expects to pass on
+    /// their own. Asking for the retry interval rather than matching error codes
+    /// keeps this to the one question that matters: will waiting fix it?
+    nonisolated static func retryInterval(for error: NSError?) -> TimeInterval? {
+        // The event's error is sometimes the CloudKit one and sometimes wraps it,
+        // so follow the chain rather than trusting the outermost layer.
+        var current = error
+        var depth = 0
+        while let error = current, depth < 4 {
+            if error.domain == CKErrorDomain {
+                if let retryAfter = error.userInfo[CKErrorRetryAfterKey] as? TimeInterval {
+                    return retryAfter
+                }
+                // These pass on their own whether or not an interval came with
+                // them: throttling and a busy zone are what seeding a large
+                // library earns, and being offline ends when the network returns.
+                switch CKError.Code(rawValue: error.code) {
+                case .requestRateLimited, .serviceUnavailable, .zoneBusy,
+                     .networkUnavailable, .networkFailure:
+                    return 0
+                default:
+                    break
+                }
+            }
+            current = error.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return nil
+    }
+
+    private func recordSyncEvent(succeeded: Bool, errorMessage: String?, retryAfter: TimeInterval?) {
+        if syncStartedAt == nil || !isSyncing {
+            syncStartedAt = Date()
+            syncRoundsCompleted = 0
+        }
+        syncRoundsCompleted += 1
         lastSyncDate = Date()
-        lastSyncErrorMessage = succeeded ? nil : errorMessage
-        if let errorMessage, !succeeded {
+
+        guard !succeeded else {
+            lastSyncErrorMessage = nil
+            throttledUntil = nil
+            return
+        }
+
+        if let retryAfter {
+            throttledUntil = Date().addingTimeInterval(retryAfter)
+            lastSyncErrorMessage = nil
+            Self.logger.info("CloudKit asked us to wait \(retryAfter, format: .fixed(precision: 1), privacy: .public)s; it will retry on its own")
+            return
+        }
+
+        throttledUntil = nil
+        lastSyncErrorMessage = errorMessage
+        if let errorMessage {
             Self.logger.error("CloudKit sync event failed: \(errorMessage, privacy: .public)")
         }
     }

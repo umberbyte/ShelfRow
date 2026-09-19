@@ -931,9 +931,27 @@ struct CloudSyncSettingsView: View {
                         .font(PreferencesLayout.bodyFont)
                         .foregroundColor(.secondary)
                 }
+
+                if libraryStore.mode == .cloud, cloudAccount.isSyncing {
+                    PreferencesDivider()
+
+                    PreferencesSettingRow(
+                        icon: "arrow.triangle.2.circlepath",
+                        title: "同期の進行",
+                        description: progressDescription
+                    ) {
+                        // Indeterminate on purpose: CloudKit reports that a round
+                        // finished, never how many records are left, so a filling
+                        // bar here would be a number we made up.
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                    }
+                }
             }
 
-            if let message = libraryStore.lastFailureMessage ?? cloudAccount.lastSyncErrorMessage {
+            if let message = libraryStore.lastFailureMessage ?? cloudAccount.lastSyncErrorMessage,
+               !cloudAccount.isThrottled {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(PreferencesLayout.smallCaptionFont)
                     .foregroundColor(.orange)
@@ -1007,6 +1025,21 @@ struct CloudSyncSettingsView: View {
         }
     }
 
+    private var progressDescription: String {
+        var parts = ["\(cloudAccount.syncRoundsCompleted)回の送受信が完了"]
+        if let elapsed = cloudAccount.syncElapsed, elapsed >= 60 {
+            parts.append("経過 \(Int(elapsed / 60))分")
+        }
+        if cloudAccount.isThrottled, let until = cloudAccount.throttledUntil {
+            let seconds = max(0, Int(until.timeIntervalSinceNow.rounded()))
+            parts.append("iCloud側の制限により約\(seconds)秒待機中")
+        }
+        // CloudKit publishes no record counts, so there is no honest percentage
+        // to show — only that work is still going.
+        parts.append("残り件数はiCloudが公開していないため表示できません")
+        return parts.joined(separator: " / ")
+    }
+
     private var lastSyncDescription: String {
         if let task = libraryStore.blockingTask {
             return "「\(task)」の実行中は切り替えできません。"
@@ -1014,7 +1047,10 @@ struct CloudSyncSettingsView: View {
         guard let date = cloudAccount.lastSyncDate else {
             return "まだ同期していません。"
         }
-        return "最終同期: \(date.formatted(date: .abbreviated, time: .shortened))"
+        let synced = "最終同期: \(date.formatted(date: .abbreviated, time: .shortened))"
+        guard cloudAccount.isThrottled else { return synced }
+        // Seeding a large library earns this routinely; CloudKit resumes by itself.
+        return synced + " — iCloud側の制限により一時待機中です。自動的に再開します。"
     }
 }
 

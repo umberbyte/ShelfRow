@@ -592,6 +592,11 @@ cloud モードのまま `modelContext.delete` でローカルのレコードを
 | アプリの iCloud がシステム設定でオフ | export/import イベントの `CKError.notAuthenticated` | cloud モード維持（ローカル書き込みは継続） | 状態欄 + [システム設定を開く] |
 | iCloud 容量不足 | `CKError.quotaExceeded` | 同上 | 状態欄 |
 | ネットワーク不通 | `CKError.networkUnavailable` / `.networkFailure` | 同上（自動再試行はフレームワーク任せ） | 状態欄「オフライン」 |
+| レート制限（`requestRateLimited` / `zoneBusy` / `serviceUnavailable`） | 同期イベントのエラー | **失敗として扱わない。** フレームワークが待って自動再開する | 「同期の進行」欄に待機中と表示。警告は出さない |
+
+> **初回シードでは常態:** 19,287 件を送ると `CKErrorDomain Code=7`（`requestRateLimited`）が数秒おきに出る。`CKRetryAfter` が付かないこともあるため、キーの有無だけでなくエラーコードでも一時的と判定し、`NSUnderlyingError` の連鎖も辿る。
+>
+> **進捗率は出せない:** `NSPersistentCloudKitContainer.Event` が公開するのは開始/終了時刻・成否・エラーだけで、レコード件数を持たない。残り件数を知るには SwiftData 内部の `ANSCKRECORDMETADATA` を直接読むしかなく、非公開スキーマへの依存になる。現状は「送受信が完了した回数」「経過時間」「待機中かどうか」を出し、パーセンテージは出さない。
 | サインアウト | `CKAccountChanged` → `.noAccount` | local へ自動切替（§6.3） | バナー |
 | 別アカウントでサインイン | `userRecordID` 不一致 | 確認ダイアログ後に切替 or 設定 OFF | ダイアログ |
 | 切替中のコンテナ生成失敗 | `ModelContainer` 初期化 throw | 旧コンテナ維持 | エラー表示、設定値は元に戻す |

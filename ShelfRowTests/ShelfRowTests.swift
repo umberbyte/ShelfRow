@@ -10,6 +10,7 @@ import Foundation
 import ImageIO
 import CoreGraphics
 import SwiftData
+import CloudKit
 @testable import ShelfRow
 
 struct ShelfRowTests {
@@ -415,6 +416,10 @@ struct LibraryModeTests {
     }
 }
 
+/// Serialized because `BookmarkVault` is a singleton: run in parallel, one test
+/// re-points it at its own container while another is still writing through it,
+/// and CoreData throws on the crossed contexts.
+@Suite(.serialized)
 @MainActor
 struct BookmarkVaultTests {
 
@@ -487,5 +492,53 @@ struct BookmarkVaultTests {
         vault.setBookmark(Data([7]), for: volume.id)
         vault.adoptBookmarksStoredOnModels(defaults: defaults)
         #expect(vault.bookmark(for: volume.id) == Data([7]))
+    }
+}
+
+struct CloudSyncRetryTests {
+
+    private func ckError(_ code: CKError.Code, retryAfter: TimeInterval? = nil) -> NSError {
+        var info: [String: Any] = [:]
+        if let retryAfter {
+            info[CKErrorRetryAfterKey] = retryAfter
+        }
+        return NSError(domain: CKErrorDomain, code: code.rawValue, userInfo: info)
+    }
+
+    @Test func rateLimitingIsWorthWaitingOut() {
+        // What seeding a 19k-book library earns from CloudKit all day long.
+        let interval = CloudAccountMonitor.retryInterval(for: ckError(.requestRateLimited, retryAfter: 22))
+        #expect(interval == 22)
+    }
+
+    @Test func throttlingCountsEvenWithoutAnInterval() {
+        // The event's error does not always carry CKRetryAfter, so the code has
+        // to be enough on its own.
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.requestRateLimited)) == 0)
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.zoneBusy)) == 0)
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.serviceUnavailable)) == 0)
+    }
+
+    @Test func aWrappedCloudKitErrorIsStillFound() {
+        let inner = ckError(.requestRateLimited, retryAfter: 30)
+        let outer = NSError(domain: NSCocoaErrorDomain, code: 134400,
+                            userInfo: [NSUnderlyingErrorKey: inner])
+        #expect(CloudAccountMonitor.retryInterval(for: outer) == 30)
+    }
+
+    @Test func beingOfflinePassesOnItsOwn() {
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.networkUnavailable)) == 0)
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.networkFailure)) == 0)
+    }
+
+    @Test func aFullAccountIsNotFixedByWaiting() {
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.quotaExceeded)) == nil)
+        #expect(CloudAccountMonitor.retryInterval(for: ckError(.notAuthenticated)) == nil)
+    }
+
+    @Test func nonCloudKitErrorsAreLeftAlone() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: 4099)
+        #expect(CloudAccountMonitor.retryInterval(for: error) == nil)
+        #expect(CloudAccountMonitor.retryInterval(for: nil) == nil)
     }
 }
