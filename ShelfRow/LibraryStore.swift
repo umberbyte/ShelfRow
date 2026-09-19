@@ -40,6 +40,9 @@ final class LibraryStore {
         static let syncEnabled = "iCloudSyncEnabled"
         /// What was actually opened last time, so startup does not wait on CloudKit.
         static let lastMode = "libraryLastEffectiveMode"
+        /// Set when this device is to be re-seeded from iCloud. Acted on at the
+        /// next launch, before any store is open.
+        static let pendingLibraryReset = "libraryPendingResetFromCloud"
     }
 
     private(set) var mode: LibraryMode
@@ -60,6 +63,16 @@ final class LibraryStore {
 
     init() {
         StoreFileBackup.rotateStartupBackup()
+
+        // Discarding this device's library has to happen with nothing holding the
+        // files open, which only the moment before the first container exists can
+        // promise. Deleting the rows instead would sync those deletions upward and
+        // empty the library everywhere.
+        if UserDefaults.standard.bool(forKey: DefaultsKey.pendingLibraryReset) {
+            StoreFileBackup.removeStoreFiles()
+            UserDefaults.standard.set(false, forKey: DefaultsKey.pendingLibraryReset)
+            Self.logger.info("Cleared this device's library; it will be refilled from iCloud")
+        }
 
         syncEnabled = UserDefaults.standard.bool(forKey: DefaultsKey.syncEnabled)
         let requested = UserDefaults.standard.string(forKey: DefaultsKey.lastMode)
@@ -95,6 +108,27 @@ final class LibraryStore {
     func needsReopen(accountAvailable: Bool) -> Bool {
         blockingTask == nil
             && Self.effectiveMode(syncEnabled: syncEnabled, accountAvailable: accountAvailable) != mode
+    }
+
+    /// Turns syncing on with this device's library as the one that fills iCloud.
+    /// Right for the first device; on any later one it would upload a second copy
+    /// of books iCloud already holds, since nothing merges them.
+    func enableSyncSeedingCloud(accountAvailable: Bool) {
+        syncEnabled = true
+        reconcile(accountAvailable: accountAvailable)
+    }
+
+    /// Turns syncing on by throwing this device's library away and taking
+    /// iCloud's. Right for every device after the first.
+    ///
+    /// The work itself is left to the next launch (see `init`), so the caller is
+    /// expected to restart the app.
+    func enableSyncReplacingLocalLibrary() {
+        StoreFileBackup.snapshotBeforeModeSwitch()
+        syncEnabled = true
+        UserDefaults.standard.set(true, forKey: DefaultsKey.pendingLibraryReset)
+        UserDefaults.standard.set(LibraryMode.cloud.rawValue, forKey: DefaultsKey.lastMode)
+        Self.logger.info("This device will be refilled from iCloud on the next launch")
     }
 
     /// Reopens the store in whichever mode the setting and account now call for.
@@ -214,6 +248,15 @@ enum StoreFileBackup {
         }
 
         copyStoreFiles(from: directory, to: backupRoot.appendingPathComponent("gen0"))
+    }
+
+    /// Deletes both stores. Only safe with no container open — see
+    /// `LibraryStore.init`. The snapshot taken beforehand is the way back.
+    static func removeStoreFiles() {
+        guard let directory = try? storeDirectory() else { return }
+        for name in storeFileNames {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
     }
 
     static func snapshotBeforeModeSwitch() {

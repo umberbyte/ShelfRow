@@ -10,6 +10,13 @@
 
 これまでの開発は、単なる「モダンなリライト」から始まり、ユーザーからの詳細なフィードバックを経て「旧アプリのUI・アセットを極限まで引き継ぐ完全移植」へと進化を遂げた。以下にその全軌跡を記録する。
 
+### 📅 第11期：2台目の接続方式を「マージしない」に確定
+*   **決定:** 2台の蔵書を突き合わせるマージは実装しない。1台目が iCloud へ送り、2台目以降は**ローカルの蔵書が消える旨を警告したうえで** iCloud の内容に置き換える（設計書 D12 / §9）。
+*   **UI:** 環境設定 > iCloud のスイッチをオンにすると確認ダイアログが出る。「この端末の蔵書を iCloud へ送る（1台目）」「iCloud の蔵書で置き換える（2台目以降、破壊的）」「キャンセル」の3択。すでに iCloud に蔵書がある状態で「1台目」を選ぶと二重登録になる旨もダイアログ本文に明記。
+*   **重要な実装判断:** 置き換えを `modelContext.delete` で行ってはならない。cloud モード中のレコード削除は iCloud へ伝播し、**全端末の蔵書を消す**。ストアファイル（`default.store*` / `local.store*`）ごと削除し、空の状態で iCloud へ接続して降ってくるのを待つ。
+*   **再起動を挟む理由:** ストアファイルの削除は、それを開いているコンテナが無い瞬間にしか安全に行えない。削除予約フラグを立てて `NSWorkspace.openApplication` で自動再起動し、`LibraryStore.init()` が最初のコンテナを作る前に削除する。直前に `ModeSwitchBackups/` へスナップショットを取る。
+*   **副作用:** 置き換えた端末では Security-Scoped Bookmark も消えるため、ボリュームのアクセス権の再設定が必要（iCloud 側の Volume は別 UUID なので残しても対応づかない）。サムネイルキャッシュは Caches 配下なので残る。
+
 ### 📅 第10期：マルチデバイス同期 Phase 1（iCloud対応の土台）
 *   **実施内容:** `documents/multi_device_sync_design.md` の Phase 1 を実装。書誌メタデータを CloudKit で同期できる形にし、端末固有のデータを分離した。iCloud 同期はまだ一度もオンにしていない（ローカルモードで動作中）。
 *   **モデル:** CloudKit は一意制約を持てず全属性にデフォルト値を要求するため、`Item` / `Volume` / `Shelf` / `CoverExtractionRecord` から `@Attribute(.unique)` を外し、宣言側デフォルト値を付けた。`legacyID` の一意性は `LibraryImporter` の fetch-before-insert が元から担保している。Phase 2 用に `Item.coverVersion` / `coverBytes` を先行追加（CloudKit スキーマは後から削除できないため）。

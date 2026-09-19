@@ -830,6 +830,10 @@ struct CloudSyncSettingsView: View {
     @Environment(LibraryStore.self) private var libraryStore
     @Environment(CloudAccountMonitor.self) private var cloudAccount
 
+    /// Nothing merges two libraries, so turning sync on has to be told which
+    /// copy survives: this device's, or the one iCloud already holds.
+    @State private var isAskingWhichLibraryWins = false
+
     /// The switch says what the user wants; the mode says what the library is
     /// actually doing. They differ whenever iCloud is signed out, which is the
     /// case this pane most needs to explain.
@@ -865,8 +869,12 @@ struct CloudSyncSettingsView: View {
                     Toggle("同期する", isOn: Binding(
                         get: { libraryStore.syncEnabled },
                         set: { isOn in
-                            libraryStore.syncEnabled = isOn
-                            libraryStore.reconcile(accountAvailable: cloudAccount.availability.isAvailable)
+                            if isOn {
+                                isAskingWhichLibraryWins = true
+                            } else {
+                                libraryStore.syncEnabled = false
+                                libraryStore.reconcile(accountAvailable: cloudAccount.availability.isAvailable)
+                            }
                         }
                     ))
                     .font(PreferencesLayout.bodyFont)
@@ -932,7 +940,7 @@ struct CloudSyncSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("複数の端末で使い始めるときは、まず1台でオンにして同期が終わってから次の端末をオンにしてください。どちらにも蔵書がある状態で同時にオンにすると、同じ本が二重に登録されることがあります。")
+            Text("2台の蔵書を突き合わせる処理は行いません。1台目でiCloudへ送り、2台目以降はiCloudの蔵書で置き換える、という使い方になります。")
                 .font(PreferencesLayout.smallCaptionFont)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -941,6 +949,36 @@ struct CloudSyncSettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await cloudAccount.refresh() }
+        .confirmationDialog(
+            "どちらの蔵書を残しますか？",
+            isPresented: $isAskingWhichLibraryWins,
+            titleVisibility: .visible
+        ) {
+            Button("この端末の蔵書をiCloudへ送る（1台目）") {
+                libraryStore.enableSyncSeedingCloud(accountAvailable: cloudAccount.availability.isAvailable)
+            }
+            Button("iCloudの蔵書で置き換える（2台目以降）", role: .destructive) {
+                libraryStore.enableSyncReplacingLocalLibrary()
+                relaunch()
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("""
+                1台目を選ぶと、この端末の蔵書がiCloudへ送られます。
+                2台目以降を選ぶと、この端末の蔵書とボリュームのアクセス権は削除され、iCloudの内容に置き換わります。削除は取り消せません。置き換えはアプリの再起動後に行われ、同期が終わるまで蔵書は空に見えます。
+                すでにiCloudに蔵書がある状態で「1台目」を選ぶと、同じ本が二重に登録されます。
+                """)
+        }
+    }
+
+    /// The replacement runs before any store is open, which only a fresh launch
+    /// can offer.
+    private func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            Task { @MainActor in NSApp.terminate(nil) }
+        }
     }
 
     private var lastSyncDescription: String {
