@@ -547,6 +547,23 @@ struct CloudSyncRetryTests {
         #expect(CloudAccountMonitor.retryInterval(for: ckError(.notAuthenticated)) == nil)
     }
 
+    @Test func aBacklogMeansStillWorking() {
+        // The case a ninety-second timer got wrong: CloudKit throttles a large
+        // upload into bursts minutes apart, and the gap is not the end of it.
+        #expect(CloudAccountMonitor.isBusy(pendingUploads: 4_000, isReceivingRounds: false))
+    }
+
+    @Test func arrivingRoundsMeanStillWorking() {
+        // A device being filled from iCloud has nothing of its own to send.
+        #expect(CloudAccountMonitor.isBusy(pendingUploads: 0, isReceivingRounds: true))
+        #expect(CloudAccountMonitor.isBusy(pendingUploads: nil, isReceivingRounds: true))
+    }
+
+    @Test func nothingWaitingAndNothingArrivingIsDone() {
+        #expect(!CloudAccountMonitor.isBusy(pendingUploads: 0, isReceivingRounds: false))
+        #expect(!CloudAccountMonitor.isBusy(pendingUploads: nil, isReceivingRounds: false))
+    }
+
     @Test func aPartialFailureReportsTheServersOwnReason() {
         // What a library first meets a production schema with: the outer error
         // says nothing, and the sentence naming the fix is two levels down.

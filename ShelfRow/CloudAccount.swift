@@ -78,16 +78,38 @@ final class CloudAccountMonitor {
         return throttledUntil > Date()
     }
 
-    /// Whether iCloud is still working through changes.
+    /// Whether iCloud still has work of ours to do.
     ///
-    /// CloudKit reports that a round finished and nothing about what is left, so
-    /// there is no count to show and no bar to fill — only whether rounds are
-    /// still arriving. They come every few seconds during a large upload, so a
-    /// long enough gap means it has settled.
-    private(set) var isSyncing = false
+    /// Taken from the count of records not yet uploaded when the store will give
+    /// it, and only otherwise from whether rounds are still arriving. The
+    /// difference matters: CloudKit throttles a large first upload into bursts
+    /// minutes apart, and a gap between them is not the same as being finished —
+    /// judging by the clock alone reports "done" in the middle of the job.
+    var isSyncing: Bool {
+        Self.isBusy(pendingUploads: pendingUploads, isReceivingRounds: isReceivingRounds)
+    }
+
+    /// Busy while anything is still waiting to go up, and busy while rounds are
+    /// arriving whether or not anything is: a device being filled from iCloud
+    /// has no backlog of its own and is plainly not finished.
+    nonisolated static func isBusy(pendingUploads: Int?, isReceivingRounds: Bool) -> Bool {
+        if let pendingUploads, pendingUploads > 0 { return true }
+        return isReceivingRounds
+    }
+
+    /// nil when the store's own bookkeeping could not be read.
+    private(set) var uploadCounts: CloudUploadCounts?
+
+    var pendingUploads: Int? { uploadCounts?.pending }
+    private(set) var isReceivingRounds = false
 
     private static let settledAfter: TimeInterval = 90
     private var settleTask: Task<Void, Never>?
+
+    /// Called by whatever is watching, since counting means reading the store.
+    func updateUploadCounts(_ counts: CloudUploadCounts?) {
+        uploadCounts = counts
+    }
 
     /// Held for the lifetime of the app — the monitor is created once by the
     /// `App` and never torn down, so there is no point at which to unregister.
@@ -207,7 +229,8 @@ final class CloudAccountMonitor {
             lastSyncDate = nil
             lastSyncErrorMessage = nil
             throttledUntil = nil
-            isSyncing = false
+            isReceivingRounds = false
+            uploadCounts = nil
             settleTask?.cancel()
             lastPurgeMessage = ours.isEmpty
                 ? "iCloudにこのアプリのデータはありませんでした。"
@@ -310,12 +333,12 @@ final class CloudAccountMonitor {
     /// Holds `isSyncing` true until rounds stop arriving. Rescheduling on every
     /// event measures the quiet gap from the last one rather than the first.
     private func markSyncing() {
-        isSyncing = true
+        isReceivingRounds = true
         settleTask?.cancel()
         settleTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.settledAfter))
             guard !Task.isCancelled else { return }
-            self?.isSyncing = false
+            self?.isReceivingRounds = false
         }
     }
 }

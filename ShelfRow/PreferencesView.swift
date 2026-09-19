@@ -952,7 +952,7 @@ struct CloudSyncSettingsView: View {
                     PreferencesSettingRow(
                         icon: "arrow.triangle.2.circlepath",
                         title: "同期の進行",
-                        description: "iCloudとの送受信の状態です。"
+                        description: syncProgressDescription
                     ) {
                         if cloudAccount.isSyncing {
                             // CloudKit says a round finished and never how many
@@ -1009,6 +1009,7 @@ struct CloudSyncSettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await cloudAccount.refresh() }
+        .task(id: libraryStore.mode) { await watchUploadBacklog() }
         .confirmationDialog(
             "どちらの蔵書を残しますか？",
             isPresented: $isAskingWhichLibraryWins,
@@ -1061,6 +1062,26 @@ struct CloudSyncSettingsView: View {
                 他の端末で同期をオンにしたままだと、その端末が同じ内容を再びアップロードします。先にすべての端末で同期をオフにしてください。
                 削除はアプリの再起動後に実行されます。
                 """)
+        }
+    }
+
+    private var syncProgressDescription: String {
+        guard let counts = cloudAccount.uploadCounts else {
+            return "iCloudとの送受信の状態です。"
+        }
+        return "未送信 \(counts.pending.formatted())件 / 送信済み \(counts.uploaded.formatted())件 / この端末 \(counts.held.formatted())件"
+    }
+
+    /// Counting the backlog means reading the store, so it only runs while
+    /// someone is looking at this pane.
+    private func watchUploadBacklog() async {
+        while !Task.isCancelled {
+            cloudAccount.updateUploadCounts(
+                libraryStore.mode == .cloud
+                    ? CloudUploadBacklog.counts(container: libraryStore.container)
+                    : nil
+            )
+            try? await Task.sleep(for: .seconds(5))
         }
     }
 
