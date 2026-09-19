@@ -720,4 +720,41 @@ struct ThumbnailDistributionTests {
         // have pointed it at a folder.
         #expect(ThumbnailDistribution.currentRoot == nil)
     }
+
+    @Test func theFolderDescribesItselfSoICloudNeedNotCarryIt() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ShelfRowManifestTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // A folder nobody has put covers in reads as empty rather than failing.
+        #expect(ThumbnailDistribution.readManifest(in: root).entries.isEmpty)
+
+        let first = UUID()
+        let second = UUID()
+        var written = try ThumbnailDistribution.updateManifest(in: root, merging: [
+            first.uuidString: .init(version: 1, bytes: 40_000),
+            second.uuidString: .init(version: 1, bytes: 50_000)
+        ])
+        #expect(written.entries.count == 2)
+        #expect(written.itemIDs == [first, second])
+
+        // Writing again merges rather than replaces, and a re-picked cover moves
+        // its own entry on without touching the other.
+        written = try ThumbnailDistribution.updateManifest(in: root, merging: [
+            first.uuidString: .init(version: 2, bytes: 41_000)
+        ])
+        #expect(written.entries.count == 2)
+        #expect(written.entry(for: first) == .init(version: 2, bytes: 41_000))
+        #expect(written.entry(for: second)?.version == 1)
+
+        let reread = ThumbnailDistribution.readManifest(in: root)
+        #expect(reread.entries == written.entries)
+    }
+
+    @Test func aCoverTheFolderDoesNotListIsNotWorthAskingAbout() {
+        // The generation path checks this before reaching for the share. With no
+        // folder open, nothing is worth asking about.
+        #expect(!ThumbnailDistribution.holdsCover(forItemID: UUID()))
+    }
 }

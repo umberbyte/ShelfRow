@@ -93,6 +93,9 @@ final class ThumbnailDistributionCoordinator {
 
     /// The folder, while access to it is open.
     private var root: URL?
+    /// What the folder says it holds. Re-read whenever the folder is opened, and
+    /// updated in place when this device adds to it.
+    private var manifest = ThumbnailDistribution.Manifest()
     private var accessHeld = false
     private var store: CoverDistributionStore?
     private var runTask: Task<Void, Never>?
@@ -246,7 +249,15 @@ final class ThumbnailDistributionCoordinator {
     /// but only while the library is shared. With syncing off there is no other
     /// device to have put anything there for this one.
     private func publishRootForCoverGeneration(_ url: URL) {
-        ThumbnailDistribution.currentRoot = libraryMode == .cloud ? url : nil
+        guard libraryMode == .cloud else {
+            ThumbnailDistribution.currentRoot = nil
+            manifest = ThumbnailDistribution.Manifest()
+            return
+        }
+        ThumbnailDistribution.currentRoot = url
+        manifest = ThumbnailDistribution.readManifest(in: url)
+        ThumbnailDistribution.setPublishedCovers(manifest.itemIDs)
+        Self.logger.info("The distribution folder lists \(self.manifest.entries.count, privacy: .public) covers")
     }
 
     private func releaseRoot() {
@@ -267,12 +278,12 @@ final class ThumbnailDistributionCoordinator {
             counts = nil
             return
         }
-        counts = try? await store.counts()
+        counts = try? await store.counts(manifest: manifest)
     }
 
     /// What a bulk fetch would cost, for the sheet that asks about it.
     func pendingFetch() async -> (count: Int, bytes: Int)? {
-        guard let store, let targets = try? await store.fetchTargets(), !targets.isEmpty else { return nil }
+        guard let store, let targets = try? await store.fetchTargets(manifest: manifest), !targets.isEmpty else { return nil }
         return (targets.count, targets.reduce(0) { $0 + $1.expectedBytes })
     }
 
@@ -291,8 +302,9 @@ final class ThumbnailDistributionCoordinator {
     /// Hands everything this device has to the distribution folder, moving each
     /// book's version along so the others learn of it through iCloud (§21.11).
     func uploadEverything() {
+        let manifest = manifest
         start(.uploading) { [self] store, root, report in
-            guard let targets = try? await store.uploadTargets(), !targets.isEmpty else {
+            guard let targets = try? await store.uploadTargets(manifest: manifest), !targets.isEmpty else {
                 return "配布元へ登録するサムネイルはありませんでした。"
             }
             report(0, targets.count)
@@ -302,17 +314,29 @@ final class ThumbnailDistributionCoordinator {
             }
             await store.recordUploaded(results)
 
+            // The folder's index is what tells the other devices these exist, so
+            // it is written last: an entry for a file that failed to arrive would
+            // send them looking for something that is not there.
+            let added = Dictionary(uniqueKeysWithValues: results.compactMap { result in
+                result.errorCode == nil
+                    ? (result.itemID.uuidString,
+                       ThumbnailDistribution.Manifest.Entry(version: result.version, bytes: result.bytes))
+                    : nil
+            })
+            await self.recordInManifest(added, at: root)
+
             let failed = results.filter { $0.errorCode != nil }.count
             return failed == 0
                 ? "\(results.count.formatted())件を配布元へ登録しました。"
-                : "\(( results.count - failed).formatted())件を登録しました。\(failed.formatted())件は書き込めませんでした。"
+                : "\((results.count - failed).formatted())件を登録しました。\(failed.formatted())件は書き込めませんでした。"
         }
     }
 
     /// Fetches everything this device is missing.
     func fetchEverything() {
+        let manifest = manifest
         start(.fetching) { [self] store, root, report in
-            guard let targets = try? await store.fetchTargets(), !targets.isEmpty else {
+            guard let targets = try? await store.fetchTargets(manifest: manifest), !targets.isEmpty else {
                 return "取得するサムネイルはありませんでした。"
             }
             report(0, targets.count)
@@ -329,6 +353,22 @@ final class ThumbnailDistributionCoordinator {
             return failed == 0
                 ? "\(results.count.formatted())件のサムネイルを取得しました。"
                 : "\((results.count - failed).formatted())件を取得しました。\(failed.formatted())件は取得できませんでした。"
+        }
+    }
+
+    /// Writes what this device added into the folder's index, and keeps the copy
+    /// held here in step with it.
+    private func recordInManifest(
+        _ added: [String: ThumbnailDistribution.Manifest.Entry],
+        at root: URL
+    ) async {
+        guard !added.isEmpty else { return }
+        do {
+            manifest = try ThumbnailDistribution.updateManifest(in: root, merging: added)
+            ThumbnailDistribution.setPublishedCovers(manifest.itemIDs)
+        } catch {
+            Self.logger.error("Could not update the distribution index: \(error.localizedDescription, privacy: .public)")
+            lastMessage = "配布元の目録を更新できませんでした: \(error.localizedDescription)"
         }
     }
 
@@ -351,10 +391,10 @@ final class ThumbnailDistributionCoordinator {
         // library-sized registration, which has its own button: a run of that
         // size here would mean two Macs had generated the same twenty thousand
         // covers, which the rules above are there to prevent.
-        await store.adoptLocalFiles()
+        await store.adoptLocalFiles(manifest: manifest)
         await store.forgetOrphanedStates()
 
-        if let uploads = try? await store.uploadTargets(),
+        if let uploads = try? await store.uploadTargets(manifest: manifest),
            !uploads.isEmpty,
            uploads.count <= Self.quietUploadCount {
             uploadEverything()

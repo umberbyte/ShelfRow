@@ -1391,7 +1391,7 @@ struct MaintenanceSettingsView: View {
                                 .disabled(!thumbnails.isActive)
                                 .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
 
-                            Text("この端末が持っているサムネイルを配布元へコピーし、他の端末が取得できるようにします。書誌情報の更新を伴うため、iCloudへの再送信が発生します。")
+                            Text("この端末が持っているサムネイルを配布元へコピーし、他の端末が取得できるようにします。iCloudは経由しないため、同期には影響しません。")
                                 .font(PreferencesLayout.captionFont)
                                 .foregroundStyle(.secondary)
                                 .lineSpacing(2)

@@ -59,6 +59,81 @@ enum ThumbnailDistribution {
         }
     }
 
+    // MARK: - The index of what the folder holds
+
+    static let manifestName = ".shelfrow-thumbnails-index.json"
+
+    /// What the distribution folder holds, as one file.
+    ///
+    /// The alternative was to raise every book's `coverVersion` when covers were
+    /// registered, so the other devices would learn of them through iCloud. That
+    /// works, but it means a library-sized registration pushes 19,287 record
+    /// changes up and every other device pulls them down — minutes of CPU on each
+    /// machine to carry information this file states in about a megabyte.
+    ///
+    /// So the folder describes itself. `Item.coverVersion` keeps its own meaning
+    /// and iCloud is left out of it: covers are not iCloud's business, and now
+    /// neither is the bookkeeping about them.
+    struct Manifest: Codable, Sendable, Equatable {
+        struct Entry: Codable, Sendable, Equatable {
+            /// Raised each time this book's cover is written again, so a device
+            /// holding an older one can tell.
+            var version: Int
+            var bytes: Int
+        }
+
+        var formatVersion: Int = ThumbnailDistribution.formatVersion
+        var updatedAt: Date = Date()
+        var updatedBy: String = Host.current().localizedName ?? "Mac"
+        /// Keyed by the item's UUID string — the same name the file carries.
+        var entries: [String: Entry] = [:]
+
+        func entry(for itemID: UUID) -> Entry? { entries[itemID.uuidString] }
+
+        var itemIDs: Set<UUID> {
+            Set(entries.keys.compactMap(UUID.init(uuidString:)))
+        }
+    }
+
+    static func manifestURL(in root: URL) -> URL {
+        root.appendingPathComponent(manifestName, isDirectory: false)
+    }
+
+    /// Reads the index, or an empty one when the folder has never had covers put
+    /// in it. A folder with files but no index is not a case worth handling
+    /// specially: the next registration writes one.
+    static func readManifest(in root: URL) -> Manifest {
+        let url = manifestURL(in: root)
+        guard let data = try? Data(contentsOf: url) else { return Manifest(entries: [:]) }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let manifest = try? decoder.decode(Manifest.self, from: data) else {
+            logger.error("The distribution index could not be read; treating the folder as empty")
+            return Manifest(entries: [:])
+        }
+        return manifest
+    }
+
+    /// Merges entries into the index and writes it back.
+    ///
+    /// Read-modify-write, which is enough for one person moving between their own
+    /// Macs. Two devices registering at the same moment could lose one side's
+    /// entries; the next pass on that device notices its covers are not in the
+    /// index and puts them back.
+    static func updateManifest(in root: URL, merging entries: [String: Manifest.Entry]) throws -> Manifest {
+        var manifest = readManifest(in: root)
+        manifest.entries.merge(entries) { _, new in new }
+        manifest.updatedAt = Date()
+        manifest.updatedBy = Host.current().localizedName ?? "Mac"
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(manifest).write(to: manifestURL(in: root), options: .atomic)
+        logger.info("The distribution folder now lists \(manifest.entries.count, privacy: .public) covers")
+        return manifest
+    }
+
     // MARK: - The folder in use
 
     /// The root currently open, for the one caller that cannot reach the
@@ -70,6 +145,11 @@ enum ThumbnailDistribution {
     /// would show up as a stutter while scrolling.
     private static let rootLock = NSLock()
     nonisolated(unsafe) private static var openRoot: URL?
+    /// Which covers the folder holds, from the index. Cover generation checks this
+    /// before reaching for the share: asking a share about a file that is not
+    /// there costs the same round trip as fetching one that is, and a bulk run
+    /// would ask twenty thousand times.
+    nonisolated(unsafe) private static var published: Set<UUID> = []
 
     static var currentRoot: URL? {
         get {
@@ -80,9 +160,23 @@ enum ThumbnailDistribution {
         set {
             rootLock.lock()
             openRoot = newValue
+            if newValue == nil { published = [] }
             rootLock.unlock()
             forgetShards()
         }
+    }
+
+    /// Whether the folder is known to hold this book's cover.
+    static func holdsCover(forItemID itemID: UUID) -> Bool {
+        rootLock.lock()
+        defer { rootLock.unlock() }
+        return openRoot != nil && published.contains(itemID)
+    }
+
+    static func setPublishedCovers(_ ids: Set<UUID>) {
+        rootLock.lock()
+        published = ids
+        rootLock.unlock()
     }
 
     // MARK: - Paths

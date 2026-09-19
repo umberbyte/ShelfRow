@@ -105,66 +105,72 @@ actor CoverDistributionStore {
     }
 
     /// The books whose thumbnail this device should fetch.
-    func fetchTargets() throws -> [CoverFetchTarget] {
+    ///
+    /// The folder's own index says what is there and at which version; this device
+    /// says what it holds. Nothing here reads `Item.coverVersion`, which is what
+    /// keeps a library-sized registration out of iCloud entirely.
+    func fetchTargets(manifest: ThumbnailDistribution.Manifest) throws -> [CoverFetchTarget] {
         let states = try statesByItemID()
         let inventory = Self.cacheInventory()
+        // Only books this library actually has. The folder may carry covers for
+        // ones this device has since deleted.
+        let mine = Set(try coverFacts().map(\.id))
 
-        return try coverFacts().compactMap { book in
-            guard book.coverVersion > 0 else { return nil }
-            let state = states[book.id]
+        return manifest.entries.compactMap { key, entry in
+            guard let itemID = UUID(uuidString: key), mine.contains(itemID) else { return nil }
+            let state = states[itemID]
 
             // A version this device has already tried three times is left alone
-            // until the library moves on to a new one.
-            if let state, state.attempts >= Self.maxAttempts, state.version < book.coverVersion,
+            // until the folder moves on to a new one.
+            if let state, state.attempts >= Self.maxAttempts, state.version < entry.version,
                state.lastErrorCode != 0 {
                 return nil
             }
 
-            let hasCurrentVersion = state?.version == book.coverVersion
-            guard !hasCurrentVersion || inventory[book.id] == nil else { return nil }
+            let hasCurrentVersion = state?.version == entry.version
+            guard !hasCurrentVersion || inventory[itemID] == nil else { return nil }
 
-            return CoverFetchTarget(itemID: book.id, version: book.coverVersion, expectedBytes: book.coverBytes)
+            return CoverFetchTarget(itemID: itemID, version: entry.version, expectedBytes: entry.bytes)
         }
     }
 
-    /// The thumbnails this device has that the distribution folder does not.
+    /// The thumbnails this device has that the folder does not, or holds an older
+    /// copy of.
     ///
-    /// Two cases, one rule: a cover generated before distribution existed
-    /// (`coverVersion == 0`), and one generated while the NAS was out of reach.
-    func uploadTargets() throws -> [CoverUploadTarget] {
-        let states = try statesByItemID()
+    /// A cover is the same cover while its size is: the files are written once
+    /// from one rendering, so a differing size means this device has re-picked it.
+    func uploadTargets(manifest: ThumbnailDistribution.Manifest) throws -> [CoverUploadTarget] {
         let inventory = Self.cacheInventory()
+        let mine = Set(try coverFacts().map(\.id))
 
-        return try coverFacts().compactMap { book in
-            guard inventory[book.id] != nil else { return nil }
-            let state = states[book.id]
+        return inventory.compactMap { itemID, bytes in
+            guard mine.contains(itemID), bytes > 0 else { return nil }
 
-            if book.coverVersion == 0 {
-                return CoverUploadTarget(itemID: book.id, version: 1)
+            guard let entry = manifest.entry(for: itemID) else {
+                return CoverUploadTarget(itemID: itemID, version: 1)
             }
-            if state?.pendingUpload == true {
-                return CoverUploadTarget(itemID: book.id, version: book.coverVersion)
-            }
-            return nil
+            guard entry.bytes != bytes else { return nil }
+            return CoverUploadTarget(itemID: itemID, version: entry.version + 1)
         }
     }
 
-    func counts() throws -> CoverDistributionCounts {
+    func counts(manifest: ThumbnailDistribution.Manifest) throws -> CoverDistributionCounts {
         let states = try statesByItemID()
         let inventory = Self.cacheInventory()
         var counts = CoverDistributionCounts()
 
-        for book in try coverFacts() {
-            let state = states[book.id]
-            let hasFile = inventory[book.id] != nil
-
-            if book.coverVersion == 0 {
-                if hasFile { counts.toUpload += 1 }
+        for itemID in try coverFacts().map(\.id) {
+            let bytes = inventory[itemID]
+            guard let entry = manifest.entry(for: itemID) else {
+                // Here but not in the folder: something for this device to hand over.
+                if bytes != nil { counts.toUpload += 1 }
                 continue
             }
-            if state?.pendingUpload == true { counts.toUpload += 1 }
 
-            if state?.version == book.coverVersion, hasFile {
+            if let bytes, bytes != entry.bytes { counts.toUpload += 1 }
+
+            let state = states[itemID]
+            if state?.version == entry.version, bytes != nil {
                 counts.held += 1
             } else if let state, state.attempts >= Self.maxAttempts, state.lastErrorCode != 0 {
                 counts.failed += 1
@@ -215,19 +221,16 @@ actor CoverDistributionStore {
         }
     }
 
-    /// Records that the distribution folder now has these, and moves the library's
-    /// version along so every other device learns of them through iCloud.
+    /// Records that the folder now has these.
+    ///
+    /// The library's records are not touched. Raising `Item.coverVersion` here is
+    /// what used to send a library-sized registration through iCloud and back
+    /// down onto every other device; the folder's index carries that information
+    /// instead, for the price of one file.
     func recordUploaded(_ uploaded: [CoverFetchResult]) {
         guard !uploaded.isEmpty else { return }
         do {
             let states = try statesByItemID()
-            // Whole records this time: their version is what has to change, and
-            // that is the number every other device reads to know there is
-            // something to fetch.
-            let items = Dictionary(
-                try modelContext.fetch(FetchDescriptor<Item>()).map { ($0.id, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
             var sinceSave = 0
 
             for result in uploaded {
@@ -246,10 +249,6 @@ actor CoverDistributionStore {
                     continue
                 }
 
-                if let item = items[result.itemID] {
-                    item.coverVersion = result.version
-                    item.coverBytes = result.bytes
-                }
                 state.version = result.version
                 state.bytes = result.bytes
                 state.pendingUpload = false
@@ -278,23 +277,25 @@ actor CoverDistributionStore {
     /// already here. Only a file of exactly the expected size is adopted — the
     /// same check a fetch makes.
     @discardableResult
-    func adoptLocalFiles() -> Int {
+    func adoptLocalFiles(manifest: ThumbnailDistribution.Manifest) -> Int {
         do {
             let states = try statesByItemID()
             let inventory = Self.cacheInventory()
             var adopted = 0
 
-            for book in try coverFacts() {
-                guard book.coverVersion > 0, states[book.id]?.version != book.coverVersion else { continue }
-                guard let bytes = inventory[book.id], bytes > 0,
-                      book.coverBytes == 0 || bytes == book.coverBytes else { continue }
+            for (itemID, entry) in manifest.entries.compactMap({ key, entry -> (UUID, ThumbnailDistribution.Manifest.Entry)? in
+                guard let itemID = UUID(uuidString: key) else { return nil }
+                return (itemID, entry)
+            }) {
+                guard states[itemID]?.version != entry.version else { continue }
+                guard let bytes = inventory[itemID], bytes > 0, bytes == entry.bytes else { continue }
 
-                let state = states[book.id] ?? {
-                    let fresh = LocalCoverState(itemID: book.id)
+                let state = states[itemID] ?? {
+                    let fresh = LocalCoverState(itemID: itemID)
                     modelContext.insert(fresh)
                     return fresh
                 }()
-                state.version = book.coverVersion
+                state.version = entry.version
                 state.bytes = bytes
                 state.attempts = 0
                 state.lastErrorCode = 0
