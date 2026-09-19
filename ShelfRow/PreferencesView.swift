@@ -1276,9 +1276,6 @@ struct MaintenanceSettingsView: View {
         static let columnGap: CGFloat = 18
         static let leadingInset: CGFloat = 6
         static let trailingGutter: CGFloat = 96
-        /// The stepper is about as wide as the gutter, and keeps the same margin
-        /// beyond it that the text has.
-        static let stepperTrailingInset: CGFloat = 16
     }
 
     /// The NAS folder thumbnails are handed around through.
@@ -1405,14 +1402,26 @@ struct MaintenanceSettingsView: View {
                     }
                 }
 
-                // Same two columns as the rows above, so the three explanations
-                // share a left edge and a right edge. The stepper sits in the
-                // gutter the text stops short of, which is what keeps it off the
-                // panel's edge.
-                HStack(alignment: .center, spacing: ThumbnailPanelLayout.columnGap) {
-                    Text("同時転送数")
-                        .font(PreferencesLayout.bodyFont)
-                        .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
+                // The same two columns as the rows above: the thing you operate on
+                // the left, level with the buttons, and the explanation beside it.
+                // Sitting after the text instead left it floating against the
+                // middle of a paragraph, belonging to neither column.
+                HStack(alignment: .top, spacing: ThumbnailPanelLayout.columnGap) {
+                    HStack(spacing: 10) {
+                        Text("同時転送数")
+                            .font(PreferencesLayout.bodyFont)
+                        Stepper(
+                            value: Binding(get: { thumbnails.concurrency }, set: { thumbnails.concurrency = $0 }),
+                            in: ThumbnailTransfer.concurrencyRange
+                        ) {
+                            Text("\(thumbnails.concurrency)")
+                                .font(PreferencesLayout.bodyFont)
+                                .monospacedDigit()
+                        }
+                        .disabled(thumbnails.isRunning)
+                        .fixedSize()
+                    }
+                    .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
 
                     Text("小さなファイルの転送は待ち時間が支配的なので、数本並べた方が速くなります。NASの反応が鈍るなら下げてください。")
                         .font(PreferencesLayout.captionFont)
@@ -1420,20 +1429,9 @@ struct MaintenanceSettingsView: View {
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Stepper(
-                        value: Binding(get: { thumbnails.concurrency }, set: { thumbnails.concurrency = $0 }),
-                        in: ThumbnailTransfer.concurrencyRange
-                    ) {
-                        Text("\(thumbnails.concurrency)")
-                            .font(PreferencesLayout.bodyFont)
-                            .monospacedDigit()
-                    }
-                    .disabled(thumbnails.isRunning)
-                    .fixedSize()
                 }
                 .padding(.leading, ThumbnailPanelLayout.leadingInset)
-                .padding(.trailing, ThumbnailPanelLayout.stepperTrailingInset)
+                .padding(.trailing, ThumbnailPanelLayout.trailingGutter)
 
                 if let message = thumbnails.lastMessage {
                     Text(message)
