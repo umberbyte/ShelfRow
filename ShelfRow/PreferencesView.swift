@@ -782,6 +782,7 @@ struct CustomizeSettingsView: View {
 struct GeneralSettingsView: View {
     @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
     @AppStorage("advancedCloseOnExit") private var closeOnExit = true
+    @AppStorage("compactSidePanes") private var compactSidePanes = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -804,6 +805,18 @@ struct GeneralSettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.segmented)
                     .frame(width: 260)
+                }
+
+                PreferencesDivider()
+
+                PreferencesSettingRow(
+                    icon: "arrow.down.right.and.arrow.up.left",
+                    title: "サイドペインを縮小",
+                    description: "左右のペインを75%に縮め、行間はそれ以上に詰めます。画面の狭いMacで本の一覧に幅を回すための表示です。"
+                ) {
+                    Toggle("縮小表示", isOn: $compactSidePanes)
+                        .font(PreferencesLayout.bodyFont)
+                        .toggleStyle(.switch)
                 }
 
                 PreferencesDivider()
