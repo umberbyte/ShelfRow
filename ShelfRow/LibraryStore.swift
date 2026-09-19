@@ -106,7 +106,7 @@ final class LibraryStore {
 
     init() {
         if Self.isRunningTests {
-            let schema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self, LocalCoverState.self])
+            let schema = Schema(Self.libraryModels + Self.localModels)
             guard let scratch = try? ModelContainer(
                 for: schema,
                 configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
@@ -300,14 +300,26 @@ final class LibraryStore {
         persistRequestedMode(target)
     }
 
+    /// What iCloud mirrors.
+    static let libraryModels: [any PersistentModel.Type] =
+        [Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self]
+
+    /// What stays on this device: access to files, and which covers it holds.
+    static let localModels: [any PersistentModel.Type] =
+        [LocalBookmark.self, LocalCoverState.self]
+
+    /// Named in one place on purpose. A model listed in a configuration's schema
+    /// but missing from the container's own is not a compile error — it is
+    /// `configurationSchemaNotFoundInContainerSchema` at launch, which the store
+    /// cannot open and the app cannot start from.
     private static func makeContainer(mode: LibraryMode) throws -> ModelContainer {
         if mode == .cloud, !CloudKitEntitlement.isPresent {
             throw LibraryStoreError.cloudKitUnavailable
         }
 
         let directory = try StoreFileBackup.storeDirectory()
-        let librarySchema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self])
-        let localSchema = Schema([LocalBookmark.self, LocalCoverState.self])
+        let librarySchema = Schema(libraryModels)
+        let localSchema = Schema(localModels)
 
         let library = ModelConfiguration(
             "Library",
@@ -322,10 +334,7 @@ final class LibraryStore {
             cloudKitDatabase: .none
         )
 
-        return try ModelContainer(
-            for: Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self,
-            configurations: library, local
-        )
+        return try ModelContainer(for: Schema(libraryModels + localModels), configurations: library, local)
     }
 }
 

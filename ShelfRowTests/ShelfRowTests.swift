@@ -669,4 +669,41 @@ struct ThumbnailDistributionTests {
         #expect(ThumbnailTransfer.concurrencyRange.contains(ThumbnailTransfer.defaultConcurrency))
         #expect(ThumbnailTransfer.concurrencyRange.lowerBound >= 1)
     }
+
+    @Test func theTwoConfigurationContainerOpensWithEveryModelItNames() throws {
+        // The mistake this catches is not a compile error: a model named by a
+        // configuration but missing from the container's own schema opens as
+        // `configurationSchemaNotFoundInContainerSchema`, which the app cannot
+        // start from. Opening it here, the way the app does, is the only check.
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ShelfRowStoreTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let library = ModelConfiguration(
+            "Library",
+            schema: Schema(LibraryStore.libraryModels),
+            url: directory.appendingPathComponent("default.store"),
+            cloudKitDatabase: .none
+        )
+        let local = ModelConfiguration(
+            "Local",
+            schema: Schema(LibraryStore.localModels),
+            url: directory.appendingPathComponent("local.store"),
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: Schema(LibraryStore.libraryModels + LibraryStore.localModels),
+            configurations: library, local
+        )
+
+        let context = ModelContext(container)
+        let item = Item(relativePath: "a.zip", title: "本", author: "著者")
+        context.insert(item)
+        context.insert(LocalCoverState(itemID: item.id, version: 1, bytes: 1234))
+        try context.save()
+
+        #expect(try context.fetchCount(FetchDescriptor<Item>()) == 1)
+        #expect(try context.fetchCount(FetchDescriptor<LocalCoverState>()) == 1)
+    }
 }
