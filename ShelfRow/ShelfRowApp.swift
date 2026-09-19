@@ -91,13 +91,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// AppKit's own identifier for the window a SwiftUI `Settings` scene creates.
     /// Undocumented but stable since it first shipped, and the only way to pick
     /// 環境設定 out of `NSApp.windows` without giving it a window of our own.
-    private static let settingsWindowIdentifier = "com_apple_SwiftUI_settings_window"
-    /// Fallback in case that identifier ever changes: the window titles macOS
-    /// gives a Settings scene by default.
-    private static let settingsWindowTitles: Set<String> = ["環境設定", "Settings", "Preferences"]
+    /// Confirmed via logging on this app's build: "com_apple_SwiftUI_Settings_window"
+    /// (capital S in "Settings").
+    private static let settingsWindowIdentifier = "com_apple_SwiftUI_Settings_window"
+    /// Fallback in case that identifier ever changes: 環境設定 titles its window
+    /// after the first settings tab (「一般」on this app's build), which is not a
+    /// stable string to match on, so this checks case-insensitively instead of
+    /// listing every possible tab name.
+    private static let settingsWindowTitleHints: Set<String> = ["設定", "環境設定", "settings", "preferences"]
 
     private static func isSettingsWindow(_ window: NSWindow) -> Bool {
-        window.identifier?.rawValue == settingsWindowIdentifier || settingsWindowTitles.contains(window.title)
+        if window.identifier?.rawValue == settingsWindowIdentifier {
+            return true
+        }
+        // 環境設定's window titles itself after the selected tab (confirmed via
+        // logging: "一般" for the General tab), not a fixed "Settings" string, so
+        // this is a weak fallback only — matched case-insensitively in case a future
+        // build's identifier differs, never expected to fire on this one.
+        return settingsWindowTitleHints.contains(window.title.lowercased())
     }
 
     private static func describe(_ window: NSWindow) -> String {
@@ -118,8 +129,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        windowLifecycleLogger.info("applicationDidFinishLaunching: registering window close observer")
-
         // AppKit only calls applicationShouldTerminateAfterLastWindowClosed once
         // every window is gone, which never happens while 環境設定 stays open — the
         // main window closing then leaves 環境設定 stranded instead of quitting.
@@ -140,19 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func windowDidClose(_ closedWindow: NSWindow) {
-        windowLifecycleLogger.info("window closing: \(Self.describe(closedWindow), privacy: .public)")
+        windowLifecycleLogger.debug("window closing: \(Self.describe(closedWindow), privacy: .public)")
 
-        guard Self.shouldTerminateWhenMainWindowCloses else {
-            windowLifecycleLogger.info("advancedCloseOnExit is off — leaving other windows as they are")
-            return
-        }
-        guard !isHandlingWindowClose else {
-            windowLifecycleLogger.info("already handling a window close — ignoring")
-            return
-        }
-        // 環境設定 closing on its own is not "the main window closed".
-        guard !Self.isSettingsWindow(closedWindow) else {
-            windowLifecycleLogger.info("the closed window is 環境設定 itself — nothing to do")
+        guard Self.shouldTerminateWhenMainWindowCloses, !isHandlingWindowClose,
+              !Self.isSettingsWindow(closedWindow) else {
             return
         }
 
@@ -166,26 +166,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func terminateIfOnlySettingsWindowRemains(after closedWindow: NSWindow) {
-        guard !isHandlingWindowClose else {
-            windowLifecycleLogger.info("already handling a window close — skipping the deferred check")
-            return
-        }
+        guard !isHandlingWindowClose else { return }
 
         let allWindows = NSApp.windows
-        windowLifecycleLogger.info("checking \(allWindows.count, privacy: .public) window(s) after close:")
-        for window in allWindows {
-            windowLifecycleLogger.info("  - \(Self.describe(window), privacy: .public)")
-        }
-
         let remaining = allWindows.filter { window in
             window !== closedWindow && window.isVisible && !Self.isSettingsWindow(window)
         }
         guard remaining.isEmpty else {
-            windowLifecycleLogger.info("\(remaining.count, privacy: .public) non-Settings window(s) still open — not quitting")
+            windowLifecycleLogger.debug("\(remaining.count, privacy: .public) non-Settings window(s) still open — not quitting")
             return
         }
 
-        windowLifecycleLogger.info("only 環境設定 remains — closing it and terminating")
+        windowLifecycleLogger.info("main window closed with only 環境設定 remaining — closing it and terminating")
         isHandlingWindowClose = true
         for window in allWindows where Self.isSettingsWindow(window) {
             window.close()
