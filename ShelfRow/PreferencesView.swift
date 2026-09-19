@@ -855,7 +855,12 @@ struct CloudSyncSettingsView: View {
     /// case this pane most needs to explain.
     private var modeText: String {
         switch libraryStore.mode {
-        case .cloud: return "クラウド（iCloudと同期中）"
+        case .cloud:
+            // Worth naming: it is why iCloud's own contents cannot be changed
+            // from here.
+            return libraryStore.isReplica
+                ? "クラウド（iCloudと同期中・2台目以降）"
+                : "クラウド（iCloudと同期中）"
         case .local:
             return libraryStore.syncEnabled
                 ? "ローカル（iCloudを利用できないため）"
@@ -970,7 +975,7 @@ struct CloudSyncSettingsView: View {
                 }
             }
 
-            if libraryStore.mode == .cloud {
+            if libraryStore.mode == .cloud, !libraryStore.isReplica {
                 PreferencesPanel {
                     PreferencesSettingRow(
                         icon: "arrow.up.doc.on.clipboard",
@@ -999,25 +1004,30 @@ struct CloudSyncSettingsView: View {
                 }
             }
 
-            PreferencesPanel {
-                PreferencesSettingRow(
-                    icon: "trash",
-                    title: "iCloudのデータを削除",
-                    description: "このアプリがiCloudに保存している書誌情報をすべて消し、使用しているiCloudの容量を解放します。この端末の蔵書・サムネイル・設定は残ります。"
-                ) {
-                    Button("iCloudから完全に削除…", role: .destructive) {
-                        isConfirmingPurge = true
+            // Both of these reach into iCloud on behalf of every device. They
+            // belong to the one that filled it; on a device that took iCloud's
+            // copy they are only a way to destroy someone else's work.
+            if !libraryStore.isReplica {
+                PreferencesPanel {
+                    PreferencesSettingRow(
+                        icon: "trash",
+                        title: "iCloudのデータを削除",
+                        description: "このアプリがiCloudに保存している書誌情報をすべて消し、使用しているiCloudの容量を解放します。この端末の蔵書・サムネイル・設定は残ります。"
+                    ) {
+                        Button("iCloudから完全に削除…", role: .destructive) {
+                            isConfirmingPurge = true
+                        }
+                        .font(PreferencesLayout.bodyFont)
+                        .disabled(!cloudAccount.availability.isAvailable || libraryStore.blockingTask != nil)
                     }
-                    .font(PreferencesLayout.bodyFont)
-                    .disabled(!cloudAccount.availability.isAvailable || libraryStore.blockingTask != nil)
                 }
-            }
 
-            if let purgeOutcome = cloudAccount.lastPurgeMessage {
-                Text(purgeOutcome)
-                    .font(PreferencesLayout.smallCaptionFont)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let purgeOutcome = cloudAccount.lastPurgeMessage {
+                    Text(purgeOutcome)
+                        .font(PreferencesLayout.smallCaptionFont)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if libraryStore.restartRequired {

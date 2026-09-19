@@ -18,6 +18,19 @@ enum LibraryMode: String, Sendable {
     case cloud
 }
 
+/// Which side a device took when syncing was turned on.
+///
+/// Only the device that filled iCloud has any business changing what is in it.
+/// A device that took iCloud's copy holds no authority over the library — its
+/// own contents came from somewhere else — so the actions that reach into
+/// iCloud are not offered there.
+enum CloudRole: String, Sendable {
+    /// Filled iCloud from its own library.
+    case primary
+    /// Threw its library away and took iCloud's.
+    case replica
+}
+
 enum LibraryStoreError: LocalizedError {
     case cloudKitUnavailable
 
@@ -48,6 +61,8 @@ final class LibraryStore {
         /// Set when iCloud's copy is to be deleted. Acted on at the next launch,
         /// once the library is open without CloudKit attached to it.
         static let pendingCloudPurge = "libraryPendingCloudPurge"
+        /// Which side this device took when syncing was turned on.
+        static let cloudRole = "libraryCloudRole"
     }
 
     private(set) var mode: LibraryMode
@@ -65,6 +80,15 @@ final class LibraryStore {
     /// While the library is being queued for upload again.
     private(set) var isResending = false
     private(set) var resendMessage: String?
+
+    /// Which side this device took, or nil if it has never been asked — which is
+    /// the case for a device that was syncing before the question was recorded.
+    /// Unknown counts as primary: hiding what someone already had would be the
+    /// worse mistake of the two.
+    private(set) var cloudRole: CloudRole?
+
+    /// Whether this device took iCloud's library rather than filling it.
+    var isReplica: Bool { cloudRole == .replica }
 
     /// The user's setting, independent of whether iCloud is reachable right now.
     var syncEnabled: Bool {
@@ -109,6 +133,8 @@ final class LibraryStore {
         }
 
         syncEnabled = UserDefaults.standard.bool(forKey: DefaultsKey.syncEnabled)
+        cloudRole = UserDefaults.standard.string(forKey: DefaultsKey.cloudRole)
+            .flatMap(CloudRole.init(rawValue:))
         let requested = UserDefaults.standard.string(forKey: DefaultsKey.lastMode)
             .flatMap(LibraryMode.init(rawValue:)) ?? .local
 
@@ -184,6 +210,7 @@ final class LibraryStore {
     func enableSyncSeedingCloud() {
         StoreFileBackup.snapshotBeforeModeSwitch()
         syncEnabled = true
+        recordRole(.primary)
         persistRequestedMode(.cloud)
     }
 
@@ -194,7 +221,17 @@ final class LibraryStore {
         StoreFileBackup.snapshotBeforeModeSwitch()
         syncEnabled = true
         UserDefaults.standard.set(true, forKey: DefaultsKey.pendingLibraryReset)
+        recordRole(.replica)
         persistRequestedMode(.cloud)
+    }
+
+    private func recordRole(_ role: CloudRole?) {
+        cloudRole = role
+        if let role {
+            UserDefaults.standard.set(role.rawValue, forKey: DefaultsKey.cloudRole)
+        } else {
+            UserDefaults.standard.removeObject(forKey: DefaultsKey.cloudRole)
+        }
     }
 
     /// Queues the whole library for upload again. For the case the store's
@@ -233,6 +270,9 @@ final class LibraryStore {
     func requestCloudPurge() {
         syncEnabled = false
         UserDefaults.standard.set(true, forKey: DefaultsKey.pendingCloudPurge)
+        // With iCloud emptied there is no copy left to have come from, so the
+        // next time syncing is turned on the question is open again.
+        recordRole(nil)
         persistRequestedMode(.local)
         Self.logger.info("iCloud's copy will be deleted on the next launch")
     }
