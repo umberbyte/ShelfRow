@@ -15,6 +15,9 @@ import SwiftUI
 struct DisplayMetrics: Equatable {
     static let elementScale: CGFloat = 0.75
     static let spacingScale: CGFloat = 0.55
+    /// Tighter still, for the padding a list or grid repeats on every row. A
+    /// point given away there is given away a screenful of times over.
+    static let rowSpacingScale: CGFloat = 0.4
 
     let isCompact: Bool
 
@@ -33,6 +36,11 @@ struct DisplayMetrics: Equatable {
     /// Gaps, padding and insets.
     func space(_ points: CGFloat) -> CGFloat {
         isCompact ? (points * Self.spacingScale).rounded() : points
+    }
+
+    /// Padding and gaps that repeat once per row.
+    func rowSpace(_ points: CGFloat) -> CGFloat {
+        isCompact ? max(1, (points * Self.rowSpacingScale).rounded()) : points
     }
 
     /// Kept above nine points, below which the labels stop being readable at

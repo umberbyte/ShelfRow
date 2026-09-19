@@ -10,23 +10,24 @@ import SwiftUI
 struct GridItemCardView: View {
     let item: Item
     let isSelected: Bool
-    
+    var metrics: DisplayMetrics = .regular
+
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: metrics.rowSpace(8)) {
             CoverImageView(item: item)
-                .frame(width: 110, height: 145)
+                .frame(width: metrics.size(110), height: metrics.size(145))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 3)
                 )
                 .cornerRadius(4)
-            
+
             Text(item.title)
-                .font(.system(size: 11, weight: isSelected ? .bold : .regular))
+                .font(metrics.font(11, weight: isSelected ? .bold : .regular))
                 .foregroundColor(isSelected ? .blue : .primary)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
-                .frame(width: 110, height: 28, alignment: .top)
+                .frame(width: metrics.size(110), height: metrics.size(28), alignment: .top)
         }
     }
 }

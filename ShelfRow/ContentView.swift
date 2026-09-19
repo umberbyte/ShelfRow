@@ -1104,18 +1104,18 @@ struct ContentView: View {
 
     private func columnWidth(_ key: ItemSortKey) -> CGFloat? {
         switch key {
-        case .unread:       return 38
-        case .bookType:     return 38
+        case .unread:       return displayMetrics.size(38)
+        case .bookType:     return displayMetrics.size(38)
         case .title:        return nil   // flexible
-        case .rating:       return 92
-        case .author:       return 120
-        case .genre:        return 90
-        case .relation:     return 90
-        case .keywordA:     return 100
-        case .keywordB:     return 100
-        case .lastReadDate: return 84
-        case .addedDate:    return 84
-        case .pages:        return 56
+        case .rating:       return displayMetrics.size(92)
+        case .author:       return displayMetrics.size(120)
+        case .genre:        return displayMetrics.size(90)
+        case .relation:     return displayMetrics.size(90)
+        case .keywordA:     return displayMetrics.size(100)
+        case .keywordB:     return displayMetrics.size(100)
+        case .lastReadDate: return displayMetrics.size(84)
+        case .addedDate:    return displayMetrics.size(84)
+        case .pages:        return displayMetrics.size(56)
         }
     }
 
@@ -1184,11 +1184,20 @@ struct ContentView: View {
                     // Grid view: sort control bar on top
                     GeometryReader { geometry in
                         ScrollView {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110, maximum: 150), spacing: 16)], spacing: 16) {
+                            LazyVGrid(
+                                columns: [GridItem(
+                                    .adaptive(
+                                        minimum: displayMetrics.size(110),
+                                        maximum: displayMetrics.size(150)
+                                    ),
+                                    spacing: displayMetrics.rowSpace(16)
+                                )],
+                                spacing: displayMetrics.rowSpace(16)
+                            ) {
                                 ForEach(itemsToDisplay) { item in
                                     // Double-tap must be attached BEFORE single-tap,
                                     // otherwise the single-tap gesture swallows it.
-                                    GridItemCardView(item: item, isSelected: isItemSelected(item))
+                                    GridItemCardView(item: item, isSelected: isItemSelected(item), metrics: displayMetrics)
                                         .contentShape(Rectangle()) // full-card hit area
                                         .id(item.id)
                                         .overlay(clickOverlay(for: item))
@@ -1241,9 +1250,9 @@ struct ContentView: View {
                         LazyVStack(spacing: 0) {
                             ForEach(itemsToDisplay.enumerated(), id: \.element.id) { index, item in
                                 classicListRow(item: item, isSelected: isItemSelected(item))
-                                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 5)
+                                    .frame(maxWidth: .infinity, minHeight: displayMetrics.size(30), alignment: .leading)
+                                    .padding(.horizontal, displayMetrics.space(12))
+                                    .padding(.vertical, displayMetrics.rowSpace(5))
                                     .background(
                                         RoundedRectangle(cornerRadius: 7)
                                             .fill(
@@ -1252,8 +1261,8 @@ struct ContentView: View {
                                                         : (index.isMultiple(of: 2) ? alternateRowFillColor : rowFillColor)
                                             )
                                     )
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1)
+                                    .padding(.horizontal, displayMetrics.space(6))
+                                    .padding(.vertical, displayMetrics.rowSpace(1))
                                     .contentShape(Rectangle()) // full-row hit area
                                     .id(item.id)
                                     .overlay(clickOverlay(for: item))
@@ -1347,18 +1356,18 @@ struct ContentView: View {
 
     // MARK: - List Header Row (click to sort, right-click to show/hide columns)
     private var listHeaderRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: displayMetrics.space(8)) {
             ForEach(listColumns) { col in
                 Button {
                     applySort(col.key)
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: displayMetrics.space(3)) {
                         Text(col.title)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(displayMetrics.font(12, weight: .semibold))
                             .lineLimit(1)
                         if sortKey == col.key {
                             Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 8, weight: .bold))
+                                .font(displayMetrics.font(8, weight: .bold))
                         }
                     }
                     .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: col.alignment)
@@ -1372,8 +1381,8 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, displayMetrics.space(10))
+        .padding(.vertical, displayMetrics.rowSpace(7))
         .background(subtleFillColor)
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -1408,7 +1417,7 @@ struct ContentView: View {
 
     // MARK: - Classic List Row (columns aligned to the header)
     private func classicListRow(item: Item, isSelected: Bool) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: displayMetrics.space(8)) {
             ForEach(listColumns) { col in
                 listCell(col, item, isSelected: isSelected)
                     .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: col.alignment)
@@ -1427,54 +1436,54 @@ struct ContentView: View {
             // Green circle like classic "O"
             Circle()
                 .stroke(isSelected ? Color.white : Color.green, lineWidth: 1.5)
-                .frame(width: 8, height: 8)
+                .frame(width: displayMetrics.size(8), height: displayMetrics.size(8))
                 .opacity(item.isUnread ? 1 : 0)
         case .bookType:
             Image(systemName: BookTypeInfo.systemImage(for: item.bookType))
-                .font(.system(size: 15))
+                .font(displayMetrics.font(15))
                 .foregroundColor(isSelected ? .white : BookTypeInfo.color(for: item.bookType))
                 .help(typeNames.indices.contains(item.bookType) ? typeNames[item.bookType] : "")
         case .title:
             Text(item.title)
-                .font(.system(size: 14))
+                .font(displayMetrics.font(14))
                 .foregroundColor(primaryColor)
                 .lineLimit(1)
         case .rating:
             RatingView(rating: .constant(item.rating), interactive: false)
-                .font(.system(size: 11))
+                .font(displayMetrics.font(11))
         case .author:
             Text(item.author)
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .genre:
             Text(item.genre)
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .relation:
             Text(item.relation)
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .keywordA:
             Text(item.keywordA)
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .keywordB:
             Text(item.keywordB)
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .lastReadDate:
             Text(item.lastReadDate?.formatted(date: .numeric, time: .omitted) ?? "—")
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         case .addedDate:
             Text(item.addedDate.formatted(date: .numeric, time: .omitted))
-                .font(.system(size: 13))
+                .font(displayMetrics.font(13))
                 .foregroundColor(secondaryColor)
                 .lineLimit(1)
         default:
