@@ -1910,6 +1910,9 @@ struct ContentView: View {
     /// the newly selected row/card visible.
     private func moveSelection(by delta: Int, extending: Bool = false) {
         guard !displayItems.isEmpty else { return }
+        if !mainContentHasFocus {
+            mainContentHasFocus = true
+        }
         let currentIndex = selectedDisplayIndex ?? displayItems.firstIndex { $0.id == selectedItemID } ?? -1
         let newIndex = min(max(currentIndex + delta, 0), displayItems.count - 1)
         let id = displayItems[newIndex].id
