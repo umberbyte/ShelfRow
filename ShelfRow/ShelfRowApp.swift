@@ -7,6 +7,9 @@
 
 import SwiftUI
 import SwiftData
+import OSLog
+
+private let windowLifecycleLogger = Logger(subsystem: "jp.aromatics.ShelfRow", category: "WindowLifecycle")
 
 enum AppAppearanceMode: String, CaseIterable, Identifiable {
     case system
@@ -97,6 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.identifier?.rawValue == settingsWindowIdentifier || settingsWindowTitles.contains(window.title)
     }
 
+    private static func describe(_ window: NSWindow) -> String {
+        "title=\"\(window.title)\" identifier=\(window.identifier?.rawValue ?? "nil") " +
+        "class=\(type(of: window)) visible=\(window.isVisible) isSettings=\(isSettingsWindow(window))"
+    }
+
     static var shouldTerminateWhenMainWindowCloses: Bool {
         // Default is ON (classic Stackroom behavior)
         if UserDefaults.standard.object(forKey: "advancedCloseOnExit") == nil {
@@ -110,6 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        windowLifecycleLogger.info("applicationDidFinishLaunching: registering window close observer")
+
         // AppKit only calls applicationShouldTerminateAfterLastWindowClosed once
         // every window is gone, which never happens while 環境設定 stays open — the
         // main window closing then leaves 環境設定 stranded instead of quitting.
@@ -121,15 +131,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let closedWindow = notification.object as? NSWindow else { return }
+            guard let closedWindow = notification.object as? NSWindow else {
+                windowLifecycleLogger.error("willCloseNotification fired with a non-NSWindow object")
+                return
+            }
             self?.windowDidClose(closedWindow)
         }
     }
 
     private func windowDidClose(_ closedWindow: NSWindow) {
-        guard !isHandlingWindowClose, Self.shouldTerminateWhenMainWindowCloses else { return }
+        windowLifecycleLogger.info("window closing: \(Self.describe(closedWindow), privacy: .public)")
+
+        guard Self.shouldTerminateWhenMainWindowCloses else {
+            windowLifecycleLogger.info("advancedCloseOnExit is off — leaving other windows as they are")
+            return
+        }
+        guard !isHandlingWindowClose else {
+            windowLifecycleLogger.info("already handling a window close — ignoring")
+            return
+        }
         // 環境設定 closing on its own is not "the main window closed".
-        guard !Self.isSettingsWindow(closedWindow) else { return }
+        guard !Self.isSettingsWindow(closedWindow) else {
+            windowLifecycleLogger.info("the closed window is 環境設定 itself — nothing to do")
+            return
+        }
 
         // Give AppKit a run-loop turn to finish tearing this window down before
         // acting: closing other windows or calling terminate(_:) synchronously from
@@ -141,15 +166,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func terminateIfOnlySettingsWindowRemains(after closedWindow: NSWindow) {
-        guard !isHandlingWindowClose else { return }
+        guard !isHandlingWindowClose else {
+            windowLifecycleLogger.info("already handling a window close — skipping the deferred check")
+            return
+        }
 
-        let remaining = NSApp.windows.filter { window in
+        let allWindows = NSApp.windows
+        windowLifecycleLogger.info("checking \(allWindows.count, privacy: .public) window(s) after close:")
+        for window in allWindows {
+            windowLifecycleLogger.info("  - \(Self.describe(window), privacy: .public)")
+        }
+
+        let remaining = allWindows.filter { window in
             window !== closedWindow && window.isVisible && !Self.isSettingsWindow(window)
         }
-        guard remaining.isEmpty else { return }
+        guard remaining.isEmpty else {
+            windowLifecycleLogger.info("\(remaining.count, privacy: .public) non-Settings window(s) still open — not quitting")
+            return
+        }
 
+        windowLifecycleLogger.info("only 環境設定 remains — closing it and terminating")
         isHandlingWindowClose = true
-        for window in NSApp.windows where Self.isSettingsWindow(window) {
+        for window in allWindows where Self.isSettingsWindow(window) {
             window.close()
         }
         NSApp.terminate(nil)
