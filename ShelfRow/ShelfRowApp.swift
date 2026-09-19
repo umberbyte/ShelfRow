@@ -82,12 +82,55 @@ private enum SwiftDataStartupBackup {
 
 /// Implements the 環境設定 > 詳細設定 "メインウインドウを閉じると終了" behavior.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    /// The main content window, captured by `MainWindowTracker` so it can be told
+    /// apart from the 環境設定 (Settings) window.
+    private weak var mainWindow: NSWindow?
+    private var mainWindowCloseObserver: NSObjectProtocol?
+    private var isHandlingMainWindowClose = false
+
+    static var shouldTerminateWhenMainWindowCloses: Bool {
         // Default is ON (classic Stackroom behavior)
         if UserDefaults.standard.object(forKey: "advancedCloseOnExit") == nil {
             return true
         }
         return UserDefaults.standard.bool(forKey: "advancedCloseOnExit")
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        Self.shouldTerminateWhenMainWindowCloses
+    }
+
+    /// Called once the main content window appears, so its close can be handled
+    /// specifically. AppKit only reports "last window closed" once every window is
+    /// gone, which never happens while 環境設定 stays open — leaving it stranded and
+    /// the app running instead of quitting.
+    func registerMainWindow(_ window: NSWindow) {
+        guard mainWindow !== window else { return }
+
+        if let mainWindowCloseObserver {
+            NotificationCenter.default.removeObserver(mainWindowCloseObserver)
+        }
+        mainWindow = window
+        mainWindowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] notification in
+            guard let closedWindow = notification.object as? NSWindow else { return }
+            self?.mainWindowDidClose(closedWindow)
+        }
+    }
+
+    private func mainWindowDidClose(_ closedWindow: NSWindow) {
+        guard !isHandlingMainWindowClose, Self.shouldTerminateWhenMainWindowCloses else { return }
+        isHandlingMainWindowClose = true
+
+        // Close every other window (環境設定 chief among them) before quitting, so
+        // none of them are left open once the app has terminated.
+        for window in NSApp.windows where window !== closedWindow {
+            window.close()
+        }
+        NSApp.terminate(nil)
     }
 }
 

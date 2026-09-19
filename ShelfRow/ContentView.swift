@@ -368,6 +368,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1160, minHeight: 680)
+        .background(MainWindowTracker())
         .sheet(isPresented: $showVolumeManager) {
             VolumeRelocationView(isPresented: $showVolumeManager)
         }
@@ -2072,6 +2073,21 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 if event.clickCount >= 2 {
                     onDoubleClick?()
                 }
+            }
+        }
+    }
+
+    /// Captures the main content window so `AppDelegate` can tell it apart from the
+    /// 環境設定 (Settings) window and close both together when it is closed.
+    private struct MainWindowTracker: NSViewRepresentable {
+        func makeNSView(context: Context) -> TrackerView { TrackerView() }
+        func updateNSView(_ nsView: TrackerView, context: Context) {}
+
+        final class TrackerView: NSView {
+            override func viewDidMoveToWindow() {
+                super.viewDidMoveToWindow()
+                guard let window else { return }
+                (NSApp.delegate as? AppDelegate)?.registerMainWindow(window)
             }
         }
     }
