@@ -144,7 +144,12 @@ final class CloudAccountMonitor {
         }
 
         if availability.isAvailable, userRecordName == nil {
-            userRecordName = try? await container.userRecordID().recordName
+            do {
+                userRecordName = try await container.userRecordID().recordName
+            } catch {
+                // Not fatal: the account is usable, we just cannot label it.
+                Self.logger.error("Could not read the iCloud user record: \(error.localizedDescription, privacy: .public)")
+            }
         }
 
         if previous != availability.isAvailable {

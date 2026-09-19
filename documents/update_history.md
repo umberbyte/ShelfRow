@@ -10,6 +10,15 @@
 
 これまでの開発は、単なる「モダンなリライト」から始まり、ユーザーからの詳細なフィードバックを経て「旧アプリのUI・アセットを極限まで引き継ぐ完全移植」へと進化を遂げた。以下にその全軌跡を記録する。
 
+### 📅 第10期：マルチデバイス同期 Phase 1（iCloud対応の土台）
+*   **実施内容:** `documents/multi_device_sync_design.md` の Phase 1 を実装。書誌メタデータを CloudKit で同期できる形にし、端末固有のデータを分離した。iCloud 同期はまだ一度もオンにしていない（ローカルモードで動作中）。
+*   **モデル:** CloudKit は一意制約を持てず全属性にデフォルト値を要求するため、`Item` / `Volume` / `Shelf` / `CoverExtractionRecord` から `@Attribute(.unique)` を外し、宣言側デフォルト値を付けた。`legacyID` の一意性は `LibraryImporter` の fetch-before-insert が元から担保している。Phase 2 用に `Item.coverVersion` / `coverBytes` を先行追加（CloudKit スキーマは後から削除できないため）。
+*   **ブックマークの分離:** Security-Scoped Bookmark を同期させると、各端末が解決できない他端末のブックマークで上書きし合う。`LocalBookmark`（同期しない第2ストア `local.store`）へ移し、`BookmarkVault` の辞書キャッシュ経由で読むようにした。`Item.bookmarkData` / `Volume.bookmarkData` は**削除せず残し**、初回起動時に中身を移して `nil` にする——属性を消すと軽量マイグレーションが既存データごと捨てるため。全端末がこのバージョンを起動した後のリリースで削除してよい。
+*   **モードの場合分け:** 設定スイッチとアカウント状態の両方が揃ったときだけ cloud。未サインイン時は CloudKit 抜きでストアを開くので、サインアウトで CloudKit がローカルを消す経路に入らない。ストアファイルは同一で開き方だけ変えるため、オフ→オンで再アップロードにならず未送信分も失われない。切替は再起動なし（`generation` でビュー階層を作り直す）。
+*   **クラッシュの原因と対策:** `CKContainer(identifier:)` は一致するコンテナエンタイトルメントが無い実行ファイルで**エラーではなくトラップ**する（署名なしビルドで必ず起動直後にクラッシュ）。`SecTaskCopyValueForEntitlement` で権限を確認してから CloudKit に触れる `CloudKitEntitlement` を追加した。
+*   **検証:** 実ライブラリ 19,287 件のスキーマ移行成功、ブックマーク 37 件の移行と再起動後の読み戻しを確認。設定「iCloud」タブで状態「利用可能」とアカウント ID 表示を確認。**iCloud 同期のオン、2台目での受信、Developer ID での公証は未検証。**
+*   **既知の課題:** App ID に Push Notifications が未設定のため `aps-environment` が署名時に剥がされ、サイレントプッシュによる即時取り込みが効かない。§9「両側非空」のマージは未実装なので、2台目を接続する前に実装が必要。
+
 ### 📅 第9期：マルチデバイス同期の設計（未実装）
 *   **実施内容:** Mac 複数台 + iPad でのデータ共有方式を検討し、設計書 `documents/multi_device_sync_design.md` を作成。コード変更なし。
 *   **確定した前提:** 利用者 1 人・同時編集なし／iPad はほぼ閲覧専用（編集は属性のみ）／実体ファイルは NAS／書誌メタデータと設定は iCloud 可／サムネイル等のキャッシュはクラウドへ上げず端末ごとに保持。

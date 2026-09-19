@@ -2,7 +2,7 @@
 
 本ドキュメントは、ShelfRow を Mac 複数台および iPad で「意識せずとも各端末が最新の状態になっている」形で使えるようにするための設計を、検討過程・採否理由・データ構造・状態遷移・UI・例外処理まで含めて記録するものである。`documents/design_document.md` の現行仕様を前提とし、変更・追加する箇所だけを扱う。
 
-> 位置づけ: 2026-09-19 時点の**設計確定版（未実装）**。実装に着手した段階で、実装差分を本書へ反映し、`design_document.md` の該当章と `update_history.md` を更新する。
+> 位置づけ: 2026-09-19 設計確定。**Phase 1 実装済み（iCloud 同期はまだ一度もオンにしていない）**、Phase 2・3 未着手。実装で判明した差分は §19 にまとめる。
 
 ---
 
@@ -620,3 +620,59 @@ iCloud
 | 配布元 | NAS 上の `ShelfRowThumbnails/`。Mac が書き、全端末が読む |
 | 対象集合 | `coverVersion > localVersion` を満たす Item の集合。サムネイル取得の単位 |
 | 両側非空 | 初回 cloud 切替時にローカルにもクラウドにもレコードがある状態 |
+
+---
+
+## 19. Phase 1 実装記録（2026-09-19）
+
+### 19.1 実装したもの
+
+| 設計 | 実装 |
+|---|---|
+| §4 モデル改修 | `Item` / `Volume` / `Shelf` / `CoverExtractionRecord` から `@Attribute(.unique)` を撤廃し、全属性に宣言側デフォルト値を付与。`Item` に `coverVersion` / `coverBytes` を追加 |
+| §4.5 `LocalBookmark` | `ShelfRow/LocalStore.swift`。`BookmarkVault`（`@MainActor`、辞書キャッシュ + 書き込み）経由で読み書きする |
+| §4.8 重複排除 | `LibraryImporter` は元から `legacyID → Item` の辞書で fetch-before-insert しており、変更不要だった |
+| §5 `LibraryStore` | `ShelfRow/LibraryStore.swift`。2 構成コンテナ、モード決定、再起動なしの再オープン、`generation` によるビュー再構築 |
+| §6.6 スナップショット | `StoreFileBackup`。起動時 3 世代（`local.store` も対象に追加）+ cloud 切替直前の 1 世代 |
+| §7 アカウント監視 | `ShelfRow/CloudAccount.swift`。`accountStatus` / `CKAccountChanged` / `eventChangedNotification` |
+| §8 設定タブ | `PreferencesView` に `PreferencesPane.icloud` と `CloudSyncSettingsView` |
+| §14.1 エンタイトルメント | CloudKit・KVS・ネットワークを追加 |
+
+テスト: `LibraryModeTests`（モード決定の真理値表、Availability 判定）、`BookmarkVaultTests`（保存・削除・再読込・モデルからの移行が一度きりであること）。
+
+### 19.2 設計からの変更点と理由
+
+1. **`Item.bookmarkData` / `Volume.bookmarkData` を削除せず残した。**
+   設計 §4.2 は削除としていたが、属性を消すと SwiftData の軽量マイグレーションが列ごと捨てるため、既存の 19,287 件が持つブックマークが移行前に失われる。`VersionedSchema` によるカスタム移行は旧モデル型一式の複製が必要で、ネストしたモデル型のエンティティ名の扱いに不確実さが残る。そこで**属性は残したまま、初回起動時に `BookmarkVault.adoptBookmarksStoredOnModels` が中身を `LocalBookmark` へ移して `nil` にする**方式にした。以後この列は常に空なので、CloudKit へ端末固有の値が流れることはない。**全端末がこのバージョンを一度起動した後、次のリリースで属性ごと削除してよい。**
+   実測: 実ライブラリで 37 件のブックマークが移行され、次回起動で読み戻されることを確認済み。
+
+2. **`LocalCoverState` は未実装。** サムネイル同期（Phase 2）でしか使わず、ローカル専用ストアへのモデル追加は軽量マイグレーションで済むため、前倒しの必要がない。`Item.coverVersion` / `coverBytes` は CloudKit スキーマが追加のみで変更できない都合があるので予定どおり先に入れた。
+
+3. **§9 両側非空の判定・マージは未実装。** 初期インポート完了の検知と件数比較、およびマージ UI が必要で、実機 2 台がないと検証できない。暫定措置として設定画面に「まず 1 台でオンにして同期が終わってから次の端末をオンにしてください」と明記した。**2 台目を使い始める前に実装すること。**
+
+4. **`CloudKitEntitlement` を追加（設計になかった要素）。**
+   `CKContainer(identifier:)` は、実行ファイルに一致するコンテナエンタイトルメントが無いとき**エラーを返さずトラップする**（`EXC_BREAKPOINT`）。署名なしのローカルビルドはこの状態になるため、起動直後に必ずクラッシュした。`SecTaskCopyValueForEntitlement` で権限の有無を確認してから CloudKit に触れるようにし、`LibraryStore.makeContainer` も cloud モード要求時に同じ確認をして `LibraryStoreError.cloudKitUnavailable` を投げる（→ ローカルへフォールバック）。
+
+5. **`aps-environment` が署名時に剥がされる。**
+   App ID に Push Notifications 機能が有効化されていないため、`ShelfRow.entitlements` に書いても署名済みバイナリには入らない。この状態でも同期自体は動くが、**CloudKit のサイレントプッシュが届かないため、他端末の変更の取り込みが起動時・フォアグラウンド復帰時などに限られる**（「意識せずとも最新」が弱まる）。Apple Developer の Identifiers で ShelfRow の App ID に Push Notifications を有効化すること。
+
+### 19.3 検証済み / 未検証
+
+| 項目 | 状態 |
+|---|---|
+| 実ライブラリ（19,287 件）のスキーマ移行 | ✅ 成功。件数・シェルフ・レート・表紙表示に欠落なし |
+| ブックマークの `LocalBookmark` への移行 | ✅ 37 件、再起動後の読み戻しも確認 |
+| ローカルモードでの通常動作 | ✅ |
+| 設定「iCloud」タブ | ✅ 状態「利用可能」、アカウント ID 表示、モード「ローカル」 |
+| Developer ID + iCloud での Archive / 公証 | ❌ 未実施（Q4） |
+| **iCloud 同期をオンにした実動作** | ❌ **未実施。** ライブラリを iCloud へ初回アップロードする操作であり、利用者の明示的な同意が要る |
+| 2 台目の端末での受信 | ❌ 未実施 |
+| モード切替（オン↔オフ）のホットスワップ | ❌ 未実施（Q3） |
+| CloudKit スキーマの Production デプロイ | ❌ 未実施（§14.3） |
+
+### 19.4 次にやること
+
+1. Apple Developer の Identifiers で App ID に Push Notifications を有効化し、`aps-environment` が署名に入ることを確認する。
+2. 1 台目で iCloud 同期をオンにし、初回アップロードと `eventChangedNotification` の挙動、ホットスワップの安定性（Q3）を確認する。
+3. §9 両側非空の判定とマージを実装してから 2 台目を接続する。
+4. Developer ID での Archive・公証を通す（Q4）。リリース前に CloudKit スキーマを Production へデプロイする。
