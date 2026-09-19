@@ -9,6 +9,7 @@ import Testing
 import Foundation
 import ImageIO
 import CoreGraphics
+import SwiftData
 @testable import ShelfRow
 
 struct ShelfRowTests {
@@ -282,6 +283,44 @@ struct ShelfRowTests {
 
         #expect(reasons.isLandscape)
         #expect(!reasons.isMissing)
+    }
+
+    @Test func coverExtractionStoreKeepsTheLatestOutcomePerBook() async throws {
+        let store = try makeCoverExtractionStore()
+        let generated = UUID()
+        let hopeless = UUID()
+
+        await store.record(generated: [generated], withoutCover: [hopeless])
+        var states = await store.states()
+        #expect(states.generated == [generated])
+        #expect(states.withoutCover == [hopeless])
+
+        // The book that had nothing usable now has a cover: it must stop counting
+        // as one without a cover, rather than appearing in both.
+        await store.record(generated: [hopeless], withoutCover: [])
+        states = await store.states()
+        #expect(states.generated == [generated, hopeless])
+        #expect(states.withoutCover.isEmpty)
+    }
+
+    @Test func coverExtractionStoreForgetsBooksNoLongerInTheLibrary() async throws {
+        let store = try makeCoverExtractionStore()
+        let kept = UUID()
+        let deleted = UUID()
+
+        await store.record(generated: [kept, deleted], withoutCover: [])
+        await store.prune(keeping: [kept])
+
+        let states = await store.states()
+        #expect(states.generated == [kept])
+    }
+
+    private func makeCoverExtractionStore() throws -> CoverExtractionStore {
+        let container = try ModelContainer(
+            for: CoverExtractionRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        return CoverExtractionStore(modelContainer: container)
     }
 
     @Test func bulkGenerationStopsRetryingABookWithNoUsableCover() throws {

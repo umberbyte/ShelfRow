@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import SwiftData
 import ImageIO
 
 extension Notification.Name {
@@ -18,6 +19,8 @@ extension Notification.Name {
 struct CoverEditorView: View {
     let item: Item
     @Binding var isPresented: Bool
+
+    @Environment(\.modelContext) private var modelContext
 
     @State private var pages: [BookPage] = []
     @State private var currentIndex = 0
@@ -186,6 +189,12 @@ struct CoverEditorView: View {
 
             if let data {
                 await ThumbnailCache.shared.setCustomCover(forItemID: itemID, imageData: data)
+
+                // A cover picked by hand is settled: bulk generation must not decide
+                // it looks like the wrong page and replace it.
+                let store = CoverExtractionStore(modelContainer: modelContext.container)
+                await store.record(generated: [itemID], withoutCover: [])
+
                 NotificationCenter.default.post(name: .coverDidChange, object: itemID)
             }
             isSaving = false

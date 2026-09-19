@@ -2496,11 +2496,18 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         Task {
             let cacheDir = ThumbnailCache.diskCacheDirectory
             let itemIDs = items.map(\.id)
+
+            // The record of what generation has already concluded, kept in its own
+            // table and read by nothing else.
+            let store = CoverExtractionStore(modelContainer: modelContext.container)
+            await store.importLegacyLogs()
+            let states = await store.states()
+
             let scanResult = await Task.detached(priority: .userInitiated) {
                 await Self.scanThumbnailRepairTargets(
                     itemIDs: itemIDs,
                     cacheDir: cacheDir,
-                    extractionLog: CoverExtractionLog.load()
+                    states: states
                 )
             }.value
 
@@ -2522,11 +2529,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             // second pass does not re-read these archives to reach the same answer.
             // Books that could not be opened at all are left out: that can change
             // by the next run, so they stay on the list.
-            let generatedIDs = outcome.generated
-            let withoutCoverIDs = outcome.withoutCover
-            await Task.detached(priority: .utility) {
-                CoverExtractionLog.record(generated: generatedIDs, withoutCover: withoutCoverIDs)
-            }.value
+            await store.record(generated: outcome.generated, withoutCover: outcome.withoutCover)
+            await store.prune(keeping: Set(itemIDs))
 
             // Items whose cover failed to load earlier in the session are
             // remembered as having none; clear that so the reload below picks up
@@ -2544,7 +2548,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     nonisolated private static func scanThumbnailRepairTargets(
         itemIDs: [UUID],
         cacheDir: URL,
-        extractionLog: CoverExtractionLog
+        states: CoverExtractionStates
     ) async -> ThumbnailRepairScanResult {
         guard !itemIDs.isEmpty else { return ThumbnailRepairScanResult() }
 
@@ -2561,8 +2565,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                         let thumbURL = cacheDir.appendingPathComponent("\(itemID.uuidString).jpg")
                         guard let reasons = thumbnailRepairReasons(
                             at: thumbURL,
-                            alreadyGenerated: extractionLog.generated.contains(itemID),
-                            knownToHaveNoCover: extractionLog.withoutCover.contains(itemID)
+                            alreadyGenerated: states.generated.contains(itemID),
+                            knownToHaveNoCover: states.withoutCover.contains(itemID)
                         ) else { continue }
                         result.itemIDs.append(itemID)
                         if reasons.isMonochrome {

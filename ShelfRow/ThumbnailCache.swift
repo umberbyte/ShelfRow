@@ -97,52 +97,6 @@ private let thumbnailMemoryStore = ThumbnailMemoryStore(
 /// re-create the directory on every read.
 private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
 
-/// What extracting a cover concluded, for the books where running it again would
-/// reach the same conclusion.
-///
-/// Extraction is deterministic, so without this record a bulk pass keeps redoing
-/// its own work: a book whose best page really is a spread or a monochrome page
-/// produces a thumbnail that looks wrong by the very rules that asked for it, and
-/// a book with nothing usable inside produces no file at all, which reads as
-/// "not generated yet". Both would be re-read on every run, forever.
-///
-/// A book that simply could not be reached — volume unmounted, file moved — is
-/// deliberately not recorded: that answer can change by the next run.
-struct CoverExtractionLog: Codable, Sendable {
-    /// Books this app has extracted a thumbnail for.
-    var generated: Set<UUID> = []
-    /// Books that were reachable but hold no page usable as a cover.
-    var withoutCover: Set<UUID> = []
-
-    private static var fileURL: URL {
-        thumbnailCacheDirectory.appendingPathComponent("cover-extraction-log.json")
-    }
-
-    static func load() -> CoverExtractionLog {
-        guard let data = try? Data(contentsOf: fileURL),
-              let log = try? JSONDecoder().decode(CoverExtractionLog.self, from: data) else {
-            return CoverExtractionLog()
-        }
-        return log
-    }
-
-    static func record(generated: [UUID], withoutCover: [UUID]) {
-        guard !generated.isEmpty || !withoutCover.isEmpty else { return }
-
-        var log = load()
-        log.generated.formUnion(generated)
-        log.withoutCover.formUnion(withoutCover)
-
-        // A book that has a cover now is no longer one without a cover, and the
-        // other way round.
-        log.withoutCover.subtract(generated)
-        log.generated.subtract(withoutCover)
-
-        guard let data = try? JSONEncoder().encode(log) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-    }
-}
-
 /// Reading an already-rendered thumbnail gets its own lane: serial, so a full
 /// grid of cells cannot spawn a thread each, and separate from the queue doing
 /// archive extraction, so a cheap read never waits behind an expensive one.
@@ -552,10 +506,6 @@ final class ThumbnailCache {
 
         thumbnailMemoryStore.store(thumbnail, forKey: itemID.uuidString)
         missingCoverKeys.remove(itemID.uuidString)
-
-        // A cover the user picked by hand is settled: a later bulk pass must not
-        // decide it looks like the wrong page and replace it.
-        CoverExtractionLog.record(generated: [itemID], withoutCover: [])
         return thumbnail
     }
 

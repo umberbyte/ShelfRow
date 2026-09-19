@@ -107,6 +107,7 @@ struct ShelfRowApp: App {
             Volume.self,
             Item.self,
             Shelf.self,
+            CoverExtractionRecord.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
