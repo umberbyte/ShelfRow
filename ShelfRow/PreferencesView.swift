@@ -834,6 +834,7 @@ struct CloudSyncSettingsView: View {
     /// copy survives: this device's, or the one iCloud already holds.
     @State private var isAskingWhichLibraryWins = false
     @State private var isConfirmingDisable = false
+    @State private var seedProgress: CloudSeedProgress?
 
     /// The switch says what the user wants; the mode says what the library is
     /// actually doing. They differ whenever iCloud is signed out, which is the
@@ -932,7 +933,7 @@ struct CloudSyncSettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
-                if libraryStore.mode == .cloud, cloudAccount.isSyncing {
+                if libraryStore.mode == .cloud, cloudAccount.isSyncing || seedProgress?.isComplete == false {
                     PreferencesDivider()
 
                     PreferencesSettingRow(
@@ -940,12 +941,23 @@ struct CloudSyncSettingsView: View {
                         title: "同期の進行",
                         description: progressDescription
                     ) {
-                        // Indeterminate on purpose: CloudKit reports that a round
-                        // finished, never how many records are left, so a filling
-                        // bar here would be a number we made up.
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .controlSize(.small)
+                        if let seedProgress {
+                            VStack(alignment: .trailing, spacing: 4) {
+                                ProgressView(value: seedProgress.fraction)
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 160)
+                                Text(seedProgress.fraction.formatted(.percent.precision(.fractionLength(1))))
+                                    .font(PreferencesLayout.smallCaptionFont)
+                                    .foregroundColor(.secondary)
+                                    .monospacedDigit()
+                            }
+                        } else {
+                            // CloudKit publishes no counts of its own; without the
+                            // store's own bookkeeping there is no honest bar.
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                        }
                     }
                 }
             }
@@ -977,6 +989,7 @@ struct CloudSyncSettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await cloudAccount.refresh() }
+        .task(id: libraryStore.mode) { await pollSeedProgress() }
         .confirmationDialog(
             "どちらの蔵書を残しますか？",
             isPresented: $isAskingWhichLibraryWins,
@@ -1014,6 +1027,19 @@ struct CloudSyncSettingsView: View {
         }
     }
 
+    /// Counting is a read of the store on disk, so it only runs while someone is
+    /// looking at this pane.
+    private func pollSeedProgress() async {
+        guard libraryStore.mode == .cloud else {
+            seedProgress = nil
+            return
+        }
+        while !Task.isCancelled {
+            seedProgress = CloudSeedProgressReader.read(container: libraryStore.container)
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
     /// Every mode change takes effect at the next launch: the store cannot be
     /// swapped under a running app without handing views models whose context
     /// has been torn down.
@@ -1026,7 +1052,11 @@ struct CloudSyncSettingsView: View {
     }
 
     private var progressDescription: String {
-        var parts = ["\(cloudAccount.syncRoundsCompleted)回の送受信が完了"]
+        var parts: [String] = []
+        if let seedProgress {
+            parts.append("\(seedProgress.mirrored.formatted()) / \(seedProgress.total.formatted()) 件")
+        }
+        parts.append("\(cloudAccount.syncRoundsCompleted)回の送受信が完了")
         if let elapsed = cloudAccount.syncElapsed, elapsed >= 60 {
             parts.append("経過 \(Int(elapsed / 60))分")
         }
@@ -1034,9 +1064,9 @@ struct CloudSyncSettingsView: View {
             let seconds = max(0, Int(until.timeIntervalSinceNow.rounded()))
             parts.append("iCloud側の制限により約\(seconds)秒待機中")
         }
-        // CloudKit publishes no record counts, so there is no honest percentage
-        // to show — only that work is still going.
-        parts.append("残り件数はiCloudが公開していないため表示できません")
+        if seedProgress == nil {
+            parts.append("残り件数はiCloudが公開していないため表示できません")
+        }
         return parts.joined(separator: " / ")
     }
 

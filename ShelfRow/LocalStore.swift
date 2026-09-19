@@ -41,9 +41,18 @@ final class BookmarkVault {
 
     private var data: [UUID: Data] = [:]
     private var rows: [UUID: LocalBookmark] = [:]
+    /// Held so the store cannot be closed out from under the context while the
+    /// vault is still writing to it. A context alone does not keep its container
+    /// alive, and saving into one whose store has gone raises an exception no
+    /// `try` can catch ("No eligible connection available").
+    private var container: ModelContainer?
     private var context: ModelContext?
 
-    private init() {}
+    /// The app uses `shared`. Anything else — tests above all — makes its own:
+    /// the test host is this very app, so a test that pointed the shared vault
+    /// at its own container would take it away from the running app mid-write,
+    /// and Core Data answers that with an exception no `try` can catch.
+    init() {}
 
     /// Points the vault at a container's local store and loads every bookmark.
     /// Called once at startup and again after the library store is reopened in a
@@ -51,6 +60,7 @@ final class BookmarkVault {
     /// `adoptBookmarksStoredOnModels` is the caller's next step.
     func attach(to container: ModelContainer) {
         let context = container.mainContext
+        self.container = container
         self.context = context
         data.removeAll()
         rows.removeAll()

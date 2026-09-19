@@ -596,7 +596,11 @@ cloud モードのまま `modelContext.delete` でローカルのレコードを
 
 > **初回シードでは常態:** 19,287 件を送ると `CKErrorDomain Code=7`（`requestRateLimited`）が数秒おきに出る。`CKRetryAfter` が付かないこともあるため、キーの有無だけでなくエラーコードでも一時的と判定し、`NSUnderlyingError` の連鎖も辿る。
 >
-> **進捗率は出せない:** `NSPersistentCloudKitContainer.Event` が公開するのは開始/終了時刻・成否・エラーだけで、レコード件数を持たない。残り件数を知るには SwiftData 内部の `ANSCKRECORDMETADATA` を直接読むしかなく、非公開スキーマへの依存になる。現状は「送受信が完了した回数」「経過時間」「待機中かどうか」を出し、パーセンテージは出さない。
+> **進捗率は非公開スキーマから取る:** `NSPersistentCloudKitContainer.Event` が公開するのは開始/終了時刻・成否・エラーだけで、レコード件数を持たない。残り件数が書かれている場所はストア内の `ANSCKRECORDMETADATA` テーブルのみなので、`CloudSeedProgressReader` が同じ SQLite ファイルを読み取り専用でもう一度開いて数える（利用者の判断で非公開スキーマへの依存を許容。壊れたら作り直す方針）。
+>
+> **数える列は `ZNEEDSUPLOAD`。** 行はオブジェクトがキューに入った時点で全件作られるため、`COUNT(*)` は常に 100% になる（実測で確認）。`ZNEEDSUPLOAD = 0` の行数が実際に送信済みの件数。テーブル名・列名はパターン照合で探し、失敗したら nil を返して「回数と経過時間だけ」の表示にフォールバックする。
+
+> **テスト実行時は実ライブラリを開かない:** このスキームはアプリ自身をテストホストにするため、テストのたびにアプリが起動して実ストアを開き、同期が有効なら CloudKit にも接続してしまう。テストが作る別コンテナと衝突してテストホストが落ちるうえ、利用者のデータを無用に開くことになる。`LibraryStore.init()` は `XCTestConfigurationFilePath` を見て、テスト実行時はインメモリのストアで起動する。
 | サインアウト | `CKAccountChanged` → `.noAccount` | local へ自動切替（§6.3） | バナー |
 | 別アカウントでサインイン | `userRecordID` 不一致 | 確認ダイアログ後に切替 or 設定 OFF | ダイアログ |
 | 切替中のコンテナ生成失敗 | `ModelContainer` 初期化 throw | 旧コンテナ維持 | エラー表示、設定値は元に戻す |

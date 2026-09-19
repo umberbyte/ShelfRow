@@ -63,7 +63,30 @@ final class LibraryStore {
         didSet { UserDefaults.standard.set(syncEnabled, forKey: DefaultsKey.syncEnabled) }
     }
 
+    /// This scheme runs its tests inside the app, so launching for a test would
+    /// otherwise open the real library — and, once syncing is on, hand it to
+    /// CloudKit — while the tests build containers of their own beside it. That
+    /// costs the person's data a needless open on every run, and the two
+    /// coordinators fight badly enough to take the test host down.
+    private static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
     init() {
+        if Self.isRunningTests {
+            let schema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self])
+            guard let scratch = try? ModelContainer(
+                for: schema,
+                configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            ) else {
+                fatalError("Could not open an in-memory library for testing")
+            }
+            container = scratch
+            mode = .local
+            syncEnabled = false
+            return
+        }
+
         StoreFileBackup.rotateStartupBackup()
 
         // Discarding this device's library has to happen with nothing holding the

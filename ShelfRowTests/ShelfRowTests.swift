@@ -416,25 +416,36 @@ struct LibraryModeTests {
     }
 }
 
-/// Serialized because `BookmarkVault` is a singleton: run in parallel, one test
-/// re-points it at its own container while another is still writing through it,
-/// and CoreData throws on the crossed contexts.
-@Suite(.serialized)
 @MainActor
 struct BookmarkVaultTests {
 
-    /// The vault is a singleton, so each test points it at its own in-memory
-    /// container rather than the app's store.
+    /// Each test gets its own vault and its own in-memory store. Never
+    /// `BookmarkVault.shared`: the test host is the app itself, and taking its
+    /// vault away mid-write is an exception no `try` can catch.
+    /// Mirrors the app's two-store layout: the library in one, the bookmarks in
+    /// their own. `LocalBookmark` belongs to a named configuration there, and a
+    /// container that puts it anywhere else leaves Core Data with no store
+    /// eligible to save it.
     private func makeContainer() throws -> ModelContainer {
-        try ModelContainer(
+        let library = ModelConfiguration(
+            "Library",
+            schema: Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self]),
+            isStoredInMemoryOnly: true
+        )
+        let local = ModelConfiguration(
+            "Local",
+            schema: Schema([LocalBookmark.self]),
+            isStoredInMemoryOnly: true
+        )
+        return try ModelContainer(
             for: Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self,
-            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+            configurations: library, local
         )
     }
 
     @Test func storesAndRemovesABookmark() throws {
         let container = try makeContainer()
-        let vault = BookmarkVault.shared
+        let vault = BookmarkVault()
         vault.attach(to: container)
 
         let targetID = UUID()
@@ -452,7 +463,7 @@ struct BookmarkVaultTests {
 
     @Test func reloadsBookmarksFromTheStore() throws {
         let container = try makeContainer()
-        let vault = BookmarkVault.shared
+        let vault = BookmarkVault()
         vault.attach(to: container)
 
         let targetID = UUID()
@@ -478,7 +489,7 @@ struct BookmarkVaultTests {
         try context.save()
 
         let defaults = try #require(UserDefaults(suiteName: "BookmarkVaultTests-\(UUID().uuidString)"))
-        let vault = BookmarkVault.shared
+        let vault = BookmarkVault()
         vault.attach(to: container)
         vault.adoptBookmarksStoredOnModels(defaults: defaults)
 

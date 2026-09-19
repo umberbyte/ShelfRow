@@ -10,6 +10,13 @@
 
 これまでの開発は、単なる「モダンなリライト」から始まり、ユーザーからの詳細なフィードバックを経て「旧アプリのUI・アセットを極限まで引き継ぐ完全移植」へと進化を遂げた。以下にその全軌跡を記録する。
 
+### 📅 第14期：同期の進捗表示と、テストが実ライブラリを開く問題の解消
+*   **進捗バー:** 環境設定 > iCloud に「同期の進行」を追加。`CloudSeedProgressReader` がストアと同じ SQLite ファイルを読み取り専用でもう一度開き、`ANSCKRECORDMETADATA` の `ZNEEDSUPLOAD = 0` の行数を数えて「M / N 件」と百分率を出す。
+*   **なぜ非公開スキーマを読むのか:** `NSPersistentCloudKitContainer.Event` は開始/終了時刻・成否・エラーしか持たず、レコード件数を一切公開しない。残り件数が書かれている場所は他に無い。利用者の判断で「OSアップデートで壊れたら作り直す」方針を採用。テーブル名・列名はパターン照合で探索し、失敗時は nil を返して「送受信の回数と経過時間」だけの表示にフォールバックする。
+*   **`COUNT(*)` では駄目だった:** メタデータの行はオブジェクトがキューに入った時点で全件作られるため、エクスポートが毎分23バッチ動いている最中でも 100% と表示された。実際に送信済みかどうかを持つのは `ZNEEDSUPLOAD` フラグ。
+*   **テストが実ライブラリを開いていた:** このスキームはアプリ自身をテストホストにするため、`xcodebuild test` のたびにアプリが起動して実ストア（19,287件）を開き、同期有効時は CloudKit にも接続していた。テストが作る別コンテナと衝突し、`NSInternalInconsistencyException: 'No eligible connection available'`（`try` で捕捉できない Objective-C 例外）でテストホストが落ちていた。`LibraryStore.init()` が `XCTestConfigurationFilePath` を見て、テスト実行時はインメモリのストアで起動するようにして解決。利用者のデータを無用に開かなくなる副次効果もある。
+*   **`BookmarkVault` がコンテナを保持:** コンテキストだけでは `ModelContainer` の生存を保証できず、解放後の保存が例外になる。
+
 ### 📅 第13期：モード切替のホットスワップを廃止し再起動方式へ
 *   **症状:** 環境設定で iCloud 同期をオンにした瞬間にクラッシュ。`SwiftData/BackingData.swift:888: Fatal error: This model instance was destroyed by calling ModelContext.reset and is no longer usable.`（`Item.id.getter`）。
 *   **原因:** 実行中に `ModelContainer` を差し替えると古い `ModelContext` が reset され、そこに属する `Item` インスタンスは以後触れた瞬間にトラップする。ルートビューに `.id(generation)` を付けて木を作り直すだけでは足りない——SwiftUI は同じ更新の中で古いビューの body を再評価することがあり、プリフェッチ等の実行中 `Task` も古いモデルを保持している。
