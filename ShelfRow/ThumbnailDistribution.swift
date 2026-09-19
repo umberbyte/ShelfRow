@@ -81,6 +81,7 @@ enum ThumbnailDistribution {
             rootLock.lock()
             openRoot = newValue
             rootLock.unlock()
+            forgetShards()
         }
     }
 
@@ -209,7 +210,7 @@ enum ThumbnailDistribution {
     static func upload(from localFile: URL, forItemID itemID: UUID, to root: URL) throws {
         let destination = fileURL(forItemID: itemID, in: root)
         let fileManager = FileManager.default
-        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try ensureShardExists(destination.deletingLastPathComponent())
 
         let temporary = destination.deletingLastPathComponent()
             .appendingPathComponent(".\(itemID.uuidString).\(ProcessInfo.processInfo.processIdentifier).tmp")
@@ -217,11 +218,41 @@ enum ThumbnailDistribution {
         try fileManager.copyItem(at: localFile, to: temporary)
 
         do {
-            _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+            // A plain rename, not `replaceItemAt`. The latter keeps the old file
+            // aside, moves metadata across and asks the volume a good deal on the
+            // way — over a share, all of it round trips, and none of it is wanted
+            // here: the file being replaced is an older copy of this same cover.
+            try? fileManager.removeItem(at: destination)
+            try fileManager.moveItem(at: temporary, to: destination)
         } catch {
             try? fileManager.removeItem(at: temporary)
             throw error
         }
+    }
+
+    /// Creating a directory that is already there still costs a round trip over a
+    /// share, and a library-sized run would pay it once per file for 256 folders
+    /// that stop being new almost immediately.
+    private static let shardLock = NSLock()
+    nonisolated(unsafe) private static var knownShards: Set<String> = []
+
+    private static func ensureShardExists(_ shard: URL) throws {
+        shardLock.lock()
+        let known = knownShards.contains(shard.path)
+        shardLock.unlock()
+        guard !known else { return }
+
+        try FileManager.default.createDirectory(at: shard, withIntermediateDirectories: true)
+        shardLock.lock()
+        knownShards.insert(shard.path)
+        shardLock.unlock()
+    }
+
+    /// Forgets which folders are known to exist, for when the root changes.
+    static func forgetShards() {
+        shardLock.lock()
+        knownShards.removeAll()
+        shardLock.unlock()
     }
 
     /// Copies a thumbnail out of the distribution folder into the local cache,
@@ -232,17 +263,11 @@ enum ThumbnailDistribution {
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: localFile.deletingLastPathComponent(), withIntermediateDirectories: true)
 
+        // One atomic write, which is itself a write to a temporary name in the
+        // same directory followed by a rename. Doing that and then replacing the
+        // file with it again was the same dance twice.
         let data = try Data(contentsOf: source)
-        let temporary = localFile.deletingLastPathComponent()
-            .appendingPathComponent(".\(itemID.uuidString).tmp")
-        try data.write(to: temporary, options: .atomic)
-
-        do {
-            _ = try fileManager.replaceItemAt(localFile, withItemAt: temporary)
-        } catch {
-            try? fileManager.removeItem(at: temporary)
-            throw error
-        }
+        try data.write(to: localFile, options: .atomic)
         return data.count
     }
 }
