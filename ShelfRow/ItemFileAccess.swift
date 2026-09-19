@@ -575,14 +575,17 @@ nonisolated enum ItemFileAccess {
     /// (drag & drop registration) takes precedence over the volume bookmark.
     @MainActor
     static func resolve(item: Item) -> ResolvedItemFile? {
+        let vault = BookmarkVault.shared
+
         // 1. Item-level bookmark: points directly at the file itself
-        if let bookmark = item.bookmarkData {
+        if let bookmark = vault.bookmark(for: item.id) {
             var isStale = false
             if let resolved = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
                resolved.startAccessingSecurityScopedResource() {
-                if isStale {
+                if isStale,
+                   let refreshed = try? resolved.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
                     // Refresh the stale bookmark while we still have access
-                    item.bookmarkData = try? resolved.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+                    vault.setBookmark(refreshed, for: item.id)
                 }
                 return ResolvedItemFile(url: resolved, securityAnchor: resolved)
             }
@@ -594,7 +597,7 @@ nonisolated enum ItemFileAccess {
         var volumeURL = URL(fileURLWithPath: volume.lastKnownPath)
         var anchor: URL? = nil
 
-        if let bookmark = volume.bookmarkData {
+        if let bookmark = vault.bookmark(for: volume.id) {
             var isStale = false
             if let resolved = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale) {
                 if resolved.startAccessingSecurityScopedResource() {

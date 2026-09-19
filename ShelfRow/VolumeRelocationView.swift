@@ -107,7 +107,7 @@ struct VolumeRowView: View {
         let path = volume.lastKnownPath
         var accessible = FileManager.default.fileExists(atPath: path)
         
-        if !accessible, let bookmark = volume.bookmarkData {
+        if !accessible, let bookmark = BookmarkVault.shared.bookmark(for: volume.id) {
             var isStale = false
             if let resolvedURL = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale) {
                 if resolvedURL.startAccessingSecurityScopedResource() {
@@ -144,7 +144,7 @@ struct VolumeRowView: View {
                     relativeTo: nil
                 )
                 
-                volume.bookmarkData = bookmark
+                BookmarkVault.shared.setBookmark(bookmark, for: volume.id)
                 volume.lastKnownPath = url.path
                 volume.name = url.lastPathComponent
                 

@@ -28,11 +28,13 @@ struct ThumbnailRequest: Sendable, Hashable {
     let volumeLastKnownPath: String
     let relativePath: String
 
+    @MainActor
     init(item: Item) {
+        let vault = BookmarkVault.shared
         self.itemID = item.id
         self.legacyID = item.legacyID
-        self.itemBookmark = item.bookmarkData
-        self.volumeBookmark = item.volume?.bookmarkData
+        self.itemBookmark = vault.bookmark(for: item.id)
+        self.volumeBookmark = item.volume.flatMap { vault.bookmark(for: $0.id) }
         self.volumeLastKnownPath = item.volume?.lastKnownPath ?? ""
         self.relativePath = item.relativePath
     }

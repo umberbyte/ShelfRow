@@ -30,9 +30,9 @@ enum CoverExtractionOutcome: String, Sendable {
 /// decision to skip only asks whether a record exists.
 @Model
 final class CoverExtractionRecord {
-    @Attribute(.unique) var itemID: UUID
-    var outcomeRaw: String
-    var updatedAt: Date
+    var itemID: UUID = UUID()
+    var outcomeRaw: String = ""
+    var updatedAt: Date = Date()
 
     var outcome: CoverExtractionOutcome? {
         CoverExtractionOutcome(rawValue: outcomeRaw)

@@ -64,6 +64,7 @@ enum PreferencesPane: String, CaseIterable, Identifiable {
     case helper
     case keywords
     case customize
+    case icloud
     case security
     case maintenance
 
@@ -76,6 +77,7 @@ enum PreferencesPane: String, CaseIterable, Identifiable {
         case .helper: return "ヘルパー"
         case .keywords: return "キーワード"
         case .customize: return "カスタマイズ"
+        case .icloud: return "iCloud"
         case .security: return "セキュリティ"
         case .maintenance: return "保守"
         }
@@ -88,6 +90,7 @@ enum PreferencesPane: String, CaseIterable, Identifiable {
         case .helper: return "square.and.arrow.up"
         case .keywords: return "tag"
         case .customize: return "slider.horizontal.3"
+        case .icloud: return "icloud"
         case .security: return "lock"
         case .maintenance: return "wrench.and.screwdriver"
         }
@@ -142,6 +145,8 @@ struct PreferencesView: View {
             KeywordEquivalenceSettingsView()
         case .customize:
             CustomizeSettingsView()
+        case .icloud:
+            CloudSyncSettingsView()
         case .security:
             SecuritySettingsView()
         case .maintenance:
@@ -821,6 +826,134 @@ struct GeneralSettingsView: View {
 }
 
 // MARK: - 5. Security Pane
+struct CloudSyncSettingsView: View {
+    @Environment(LibraryStore.self) private var libraryStore
+    @Environment(CloudAccountMonitor.self) private var cloudAccount
+
+    /// The switch says what the user wants; the mode says what the library is
+    /// actually doing. They differ whenever iCloud is signed out, which is the
+    /// case this pane most needs to explain.
+    private var modeText: String {
+        switch libraryStore.mode {
+        case .cloud: return "クラウド（iCloudと同期中）"
+        case .local:
+            return libraryStore.syncEnabled
+                ? "ローカル（iCloudを利用できないため）"
+                : "ローカル"
+        }
+    }
+
+    private var canToggle: Bool {
+        // Turning it off has to stay possible while signed out, or the setting
+        // would be stuck on with no way back.
+        libraryStore.syncEnabled || cloudAccount.availability.isAvailable
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            PreferencesSectionHeader(
+                title: "iCloud",
+                subtitle: "本・シェルフ・ボリュームの書誌情報を、同じiCloudアカウントのMacやiPadと同期します。サムネイルと書籍ファイルはiCloudへ送信されません。"
+            )
+
+            PreferencesPanel {
+                PreferencesSettingRow(
+                    icon: "icloud",
+                    title: "iCloud同期",
+                    description: "オフにするとこの端末だけで動作します。オフの間の変更は、次にオンにしたときにまとめて送信されます。"
+                ) {
+                    Toggle("同期する", isOn: Binding(
+                        get: { libraryStore.syncEnabled },
+                        set: { isOn in
+                            libraryStore.syncEnabled = isOn
+                            libraryStore.reconcile(accountAvailable: cloudAccount.availability.isAvailable)
+                        }
+                    ))
+                    .font(PreferencesLayout.bodyFont)
+                    .toggleStyle(.switch)
+                    .disabled(!canToggle || libraryStore.blockingTask != nil)
+                }
+
+                PreferencesDivider()
+
+                PreferencesSettingRow(
+                    icon: "checkmark.seal",
+                    title: "状態",
+                    description: cloudAccount.availability.statusText
+                ) {
+                    Button("更新") {
+                        Task { await cloudAccount.refresh() }
+                    }
+                    .font(PreferencesLayout.bodyFont)
+                }
+
+                PreferencesDivider()
+
+                PreferencesSettingRow(
+                    icon: "person.crop.circle",
+                    title: "アカウント",
+                    description: cloudAccount.userRecordName.map {
+                        "ID: \($0)\n同じiCloudアカウントの端末では同じIDになります。メールアドレスはiCloudの仕様によりアプリからは取得できません。"
+                    } ?? "サインインすると、このアカウントのIDを表示します。"
+                ) {
+                    HStack(spacing: 6) {
+                        if let recordName = cloudAccount.userRecordName {
+                            Button("コピー") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(recordName, forType: .string)
+                            }
+                        }
+                        Button("システム設定") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                    .font(PreferencesLayout.bodyFont)
+                }
+
+                PreferencesDivider()
+
+                PreferencesSettingRow(
+                    icon: "externaldrive.connected.to.line.below",
+                    title: "現在のモード",
+                    description: lastSyncDescription
+                ) {
+                    Text(modeText)
+                        .font(PreferencesLayout.bodyFont)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if let message = libraryStore.lastFailureMessage ?? cloudAccount.lastSyncErrorMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(PreferencesLayout.smallCaptionFont)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("複数の端末で使い始めるときは、まず1台でオンにして同期が終わってから次の端末をオンにしてください。どちらにも蔵書がある状態で同時にオンにすると、同じ本が二重に登録されることがあります。")
+                .font(PreferencesLayout.smallCaptionFont)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task { await cloudAccount.refresh() }
+    }
+
+    private var lastSyncDescription: String {
+        if let task = libraryStore.blockingTask {
+            return "「\(task)」の実行中は切り替えできません。"
+        }
+        guard let date = cloudAccount.lastSyncDate else {
+            return "まだ同期していません。"
+        }
+        return "最終同期: \(date.formatted(date: .abbreviated, time: .shortened))"
+    }
+}
+
 struct SecuritySettingsView: View {
     @AppStorage("advancedPasswordLockEnabled") private var lockEnabled = false
     @AppStorage("advancedPasswordValue") private var passwordValue = ""

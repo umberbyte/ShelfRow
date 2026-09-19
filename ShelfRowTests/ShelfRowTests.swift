@@ -388,3 +388,104 @@ struct ShelfRowTests {
         return data as Data
     }
 }
+
+// MARK: - Multi-device sync
+
+@MainActor
+struct LibraryModeTests {
+
+    @Test func syncingNeedsBothTheSettingAndAnAccount() {
+        #expect(LibraryStore.effectiveMode(syncEnabled: true, accountAvailable: true) == .cloud)
+        #expect(LibraryStore.effectiveMode(syncEnabled: true, accountAvailable: false) == .local)
+        #expect(LibraryStore.effectiveMode(syncEnabled: false, accountAvailable: true) == .local)
+        #expect(LibraryStore.effectiveMode(syncEnabled: false, accountAvailable: false) == .local)
+    }
+
+    @Test func onlyAnAvailableAccountCountsAsAvailable() {
+        #expect(CloudAccountMonitor.Availability.available.isAvailable)
+        #expect(!CloudAccountMonitor.Availability.checking.isAvailable)
+        #expect(!CloudAccountMonitor.Availability.noAccount.isAvailable)
+        #expect(!CloudAccountMonitor.Availability.restricted.isAvailable)
+        #expect(!CloudAccountMonitor.Availability.unavailable("圏外").isAvailable)
+    }
+
+    @Test func anUnavailableAccountExplainsWhy() {
+        let status = CloudAccountMonitor.Availability.unavailable("一時的に利用できません").statusText
+        #expect(status.contains("一時的に利用できません"))
+    }
+}
+
+@MainActor
+struct BookmarkVaultTests {
+
+    /// The vault is a singleton, so each test points it at its own in-memory
+    /// container rather than the app's store.
+    private func makeContainer() throws -> ModelContainer {
+        try ModelContainer(
+            for: Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+    }
+
+    @Test func storesAndRemovesABookmark() throws {
+        let container = try makeContainer()
+        let vault = BookmarkVault.shared
+        vault.attach(to: container)
+
+        let targetID = UUID()
+        #expect(!vault.hasBookmark(for: targetID))
+
+        vault.setBookmark(Data([1, 2, 3]), for: targetID)
+        #expect(vault.bookmark(for: targetID) == Data([1, 2, 3]))
+
+        vault.setBookmark(Data([4]), for: targetID)
+        #expect(vault.bookmark(for: targetID) == Data([4]))
+
+        vault.setBookmark(nil, for: targetID)
+        #expect(!vault.hasBookmark(for: targetID))
+    }
+
+    @Test func reloadsBookmarksFromTheStore() throws {
+        let container = try makeContainer()
+        let vault = BookmarkVault.shared
+        vault.attach(to: container)
+
+        let targetID = UUID()
+        vault.setBookmark(Data([9, 9]), for: targetID)
+
+        // Reattaching is what a mode switch does: the in-memory copy is dropped
+        // and everything is read back from the local store.
+        vault.attach(to: container)
+        #expect(vault.bookmark(for: targetID) == Data([9, 9]))
+    }
+
+    @Test func movesBookmarksOffTheSyncedModelsOnce() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+
+        let volume = Volume(name: "NAS", lastKnownPath: "/Volumes/NAS")
+        volume.bookmarkData = Data([1])
+        context.insert(volume)
+
+        let item = Item(volume: volume, relativePath: "a.zip", title: "A")
+        item.bookmarkData = Data([2])
+        context.insert(item)
+        try context.save()
+
+        let defaults = try #require(UserDefaults(suiteName: "BookmarkVaultTests-\(UUID().uuidString)"))
+        let vault = BookmarkVault.shared
+        vault.attach(to: container)
+        vault.adoptBookmarksStoredOnModels(defaults: defaults)
+
+        #expect(vault.bookmark(for: volume.id) == Data([1]))
+        #expect(vault.bookmark(for: item.id) == Data([2]))
+        // Emptied so the shared library carries nothing device-specific.
+        #expect(volume.bookmarkData == nil)
+        #expect(item.bookmarkData == nil)
+
+        // A second run must not undo a bookmark the user has since replaced.
+        vault.setBookmark(Data([7]), for: volume.id)
+        vault.adoptBookmarksStoredOnModels(defaults: defaults)
+        #expect(vault.bookmark(for: volume.id) == Data([7]))
+    }
+}

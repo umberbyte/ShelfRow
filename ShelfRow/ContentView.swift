@@ -2217,7 +2217,9 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         // repairs its access permission via a fresh security-scoped bookmark.
         let fetchDescriptor = FetchDescriptor<Item>(predicate: #Predicate { $0.relativePath == relativePath })
         if let existing = try? modelContext.fetch(fetchDescriptor).first {
-            existing.bookmarkData = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            if let refreshed = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                BookmarkVault.shared.setBookmark(refreshed, for: existing.id)
+            }
             addToStaticShelfIfNeeded(existing, shelfID: targetShelfID)
             if existing.pages == 0 {
                 schedulePageCountRefreshIfNeeded(
@@ -2257,7 +2259,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             id: itemID,
             volume: volume,
             relativePath: relativePath,
-            bookmarkData: itemBookmark,
             title: title,
             author: parsed.author,
             genre: parsed.genre,
@@ -2270,6 +2271,9 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         )
 
         modelContext.insert(newItem)
+        if let itemBookmark {
+            BookmarkVault.shared.setBookmark(itemBookmark, for: itemID)
+        }
         addToStaticShelfIfNeeded(newItem, shelfID: targetShelfID)
         schedulePageCountRefreshIfNeeded(
             itemID: itemID,
@@ -2874,7 +2878,9 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
         item.volume = volume
         item.relativePath = relativePath
-        item.bookmarkData = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+        if let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+            BookmarkVault.shared.setBookmark(bookmark, for: item.id)
+        }
         try? modelContext.save()
 
         // Refresh the cover from the new location
@@ -3059,8 +3065,8 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         理由: \(reason)
         ボリューム名: \(volume?.name ?? "（なし）")
         マウントパス: \(volume?.lastKnownPath ?? "-")
-        ボリュームのアクセス権: \(volume?.bookmarkData != nil ? "保存済み" : "未保存")
-        アイテム個別のアクセス権: \(item.bookmarkData != nil ? "あり" : "なし")
+        ボリュームのアクセス権: \(volume.map { BookmarkVault.shared.hasBookmark(for: $0.id) } == true ? "保存済み" : "未保存")
+        アイテム個別のアクセス権: \(BookmarkVault.shared.hasBookmark(for: item.id) ? "あり" : "なし")
         相対パス: \(item.relativePath)
         解決したフルパス: \(resolved?.url.path ?? "-")
         """

@@ -10,13 +10,13 @@ import SwiftData
 
 @Model
 final class Shelf {
-    @Attribute(.unique) var id: UUID
-    var title: String
-    var icon: Int
-    var type: Int // 0 = standard, 1 = smart
+    var id: UUID = UUID()
+    var title: String = ""
+    var icon: Int = 0
+    var type: Int = 0 // 0 = standard, 1 = smart
     var sortOrder: Int = 0
-    var sortAscending: Bool
-    var sortKey: String
+    var sortAscending: Bool = true
+    var sortKey: String = "title"
     var smartConditionsJson: String?
     
     @Relationship(inverse: \Item.shelves)

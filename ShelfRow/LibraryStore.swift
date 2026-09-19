@@ -1,0 +1,241 @@
+//
+//  LibraryStore.swift
+//  ShelfRow
+//
+
+import Foundation
+import OSLog
+import SwiftData
+
+/// How the library store is open.
+///
+/// The store file is the same either way — only whether CloudKit mirrors it
+/// changes. Keeping one file is what lets the setting be turned off and on
+/// again without re-uploading the library or losing what has not been sent yet.
+enum LibraryMode: String, Sendable {
+    case local
+    case cloud
+}
+
+enum LibraryStoreError: LocalizedError {
+    case cloudKitUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .cloudKitUnavailable: return CloudKitEntitlement.missingMessage
+        }
+    }
+}
+
+/// Decides which mode to open in, opens it, and reopens when the answer changes.
+@Observable
+@MainActor
+final class LibraryStore {
+    private static let logger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "LibraryStore")
+
+    static let cloudContainerIdentifier = "iCloud.com.eureka.ShelfRow"
+
+    private enum DefaultsKey {
+        /// What the user asked for, which outlives a signed-out spell.
+        static let syncEnabled = "iCloudSyncEnabled"
+        /// What was actually opened last time, so startup does not wait on CloudKit.
+        static let lastMode = "libraryLastEffectiveMode"
+    }
+
+    private(set) var mode: LibraryMode
+    private(set) var container: ModelContainer
+    /// Bumped on every reopen. The root view keys off it, so the whole tree —
+    /// and every `@Query` holding the old context — is rebuilt.
+    private(set) var generation = 0
+    private(set) var lastFailureMessage: String?
+
+    /// A long-running job that must finish before the store can be reopened
+    /// underneath it (import, bulk cover generation, restore).
+    var blockingTask: String?
+
+    /// The user's setting, independent of whether iCloud is reachable right now.
+    var syncEnabled: Bool {
+        didSet { UserDefaults.standard.set(syncEnabled, forKey: DefaultsKey.syncEnabled) }
+    }
+
+    init() {
+        StoreFileBackup.rotateStartupBackup()
+
+        syncEnabled = UserDefaults.standard.bool(forKey: DefaultsKey.syncEnabled)
+        let requested = UserDefaults.standard.string(forKey: DefaultsKey.lastMode)
+            .flatMap(LibraryMode.init(rawValue:)) ?? .local
+
+        do {
+            container = try Self.makeContainer(mode: requested)
+            mode = requested
+        } catch {
+            Self.logger.error("Could not open the library in \(requested.rawValue, privacy: .public) mode: \(error.localizedDescription, privacy: .public)")
+            guard let fallback = try? Self.makeContainer(mode: .local) else {
+                fatalError("Could not open the library store: \(error)")
+            }
+            container = fallback
+            mode = .local
+            lastFailureMessage = "iCloud同期を開始できなかったため、ローカルで起動しました: \(error.localizedDescription)"
+        }
+
+        UserDefaults.standard.set(mode.rawValue, forKey: DefaultsKey.lastMode)
+        BookmarkVault.shared.attach(to: container)
+        BookmarkVault.shared.adoptBookmarksStoredOnModels()
+    }
+
+    /// The mode the app should be in. The setting alone is not enough: without an
+    /// iCloud account the store must open locally, or signing out would take the
+    /// library with it.
+    nonisolated static func effectiveMode(syncEnabled: Bool, accountAvailable: Bool) -> LibraryMode {
+        syncEnabled && accountAvailable ? .cloud : .local
+    }
+
+    /// True when the store is open in a mode that no longer matches the setting
+    /// and the account, and nothing long-running is in the way.
+    func needsReopen(accountAvailable: Bool) -> Bool {
+        blockingTask == nil
+            && Self.effectiveMode(syncEnabled: syncEnabled, accountAvailable: accountAvailable) != mode
+    }
+
+    /// Reopens the store in whichever mode the setting and account now call for.
+    @discardableResult
+    func reconcile(accountAvailable: Bool) -> Bool {
+        let target = Self.effectiveMode(syncEnabled: syncEnabled, accountAvailable: accountAvailable)
+        guard target != mode else { return false }
+        guard blockingTask == nil else {
+            Self.logger.info("Deferring the switch to \(target.rawValue, privacy: .public): \(self.blockingTask ?? "", privacy: .public) is running")
+            return false
+        }
+        return reopen(in: target)
+    }
+
+    @discardableResult
+    private func reopen(in target: LibraryMode) -> Bool {
+        // A crash or a mid-switch account change is the one moment CloudKit could
+        // decide the local copy belongs to someone else, so keep a copy first.
+        if target == .cloud {
+            StoreFileBackup.snapshotBeforeModeSwitch()
+        }
+
+        do {
+            try container.mainContext.save()
+        } catch {
+            Self.logger.error("Could not save before switching modes: \(error.localizedDescription, privacy: .public)")
+        }
+
+        do {
+            let reopened = try Self.makeContainer(mode: target)
+            container = reopened
+            mode = target
+            generation += 1
+            lastFailureMessage = nil
+            UserDefaults.standard.set(target.rawValue, forKey: DefaultsKey.lastMode)
+            BookmarkVault.shared.attach(to: reopened)
+            Self.logger.info("Reopened the library in \(target.rawValue, privacy: .public) mode")
+            return true
+        } catch {
+            // The old container is untouched, so staying on it is safe.
+            Self.logger.error("Could not reopen in \(target.rawValue, privacy: .public) mode: \(error.localizedDescription, privacy: .public)")
+            lastFailureMessage = "モードを切り替えられませんでした: \(error.localizedDescription)"
+            if target == .cloud {
+                syncEnabled = false
+            }
+            return false
+        }
+    }
+
+    private static func makeContainer(mode: LibraryMode) throws -> ModelContainer {
+        if mode == .cloud, !CloudKitEntitlement.isPresent {
+            throw LibraryStoreError.cloudKitUnavailable
+        }
+
+        let directory = try StoreFileBackup.storeDirectory()
+        let librarySchema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self])
+        let localSchema = Schema([LocalBookmark.self])
+
+        let library = ModelConfiguration(
+            "Library",
+            schema: librarySchema,
+            url: directory.appendingPathComponent(StoreFileBackup.libraryStoreName),
+            cloudKitDatabase: mode == .cloud ? .private(cloudContainerIdentifier) : .none
+        )
+        let local = ModelConfiguration(
+            "Local",
+            schema: localSchema,
+            url: directory.appendingPathComponent(StoreFileBackup.localStoreName),
+            cloudKitDatabase: .none
+        )
+
+        return try ModelContainer(
+            for: Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self,
+            configurations: library, local
+        )
+    }
+}
+
+// MARK: - Store file copies
+
+/// Copies of the store files taken where losing them would be unrecoverable:
+/// a rotating three deep at every launch, and one more before iCloud is first
+/// allowed to touch the library.
+enum StoreFileBackup {
+    static let libraryStoreName = "default.store"
+    static let localStoreName = "local.store"
+
+    private static let maxGenerations = 3
+    private static let startupBackupDirName = "StartupBackups"
+    private static let modeSwitchBackupDirName = "ModeSwitchBackups"
+
+    /// Every file SQLite keeps for a store — the WAL and shared-memory files hold
+    /// writes that have not been checkpointed, so a copy without them is torn.
+    private static var storeFileNames: [String] {
+        [libraryStoreName, localStoreName].flatMap { [$0, "\($0)-wal", "\($0)-shm"] }
+    }
+
+    static func storeDirectory() throws -> URL {
+        let directory = URL.applicationSupportDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    /// gen0 is newest, gen2 oldest. Failures are swallowed: a missing backup must
+    /// never keep the app from starting.
+    static func rotateStartupBackup() {
+        guard let directory = try? storeDirectory() else { return }
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: directory.appendingPathComponent(libraryStoreName).path) else { return }
+
+        let backupRoot = directory.appendingPathComponent(startupBackupDirName, isDirectory: true)
+        try? fileManager.removeItem(at: backupRoot.appendingPathComponent("gen\(maxGenerations - 1)"))
+        for generation in stride(from: maxGenerations - 2, through: 0, by: -1) {
+            let source = backupRoot.appendingPathComponent("gen\(generation)")
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            try? fileManager.moveItem(at: source, to: backupRoot.appendingPathComponent("gen\(generation + 1)"))
+        }
+
+        copyStoreFiles(from: directory, to: backupRoot.appendingPathComponent("gen0"))
+    }
+
+    static func snapshotBeforeModeSwitch() {
+        guard let directory = try? storeDirectory() else { return }
+        let destination = directory.appendingPathComponent(modeSwitchBackupDirName, isDirectory: true)
+        try? FileManager.default.removeItem(at: destination)
+        copyStoreFiles(from: directory, to: destination)
+    }
+
+    private static func copyStoreFiles(from directory: URL, to destination: URL) {
+        let fileManager = FileManager.default
+        do {
+            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+            for name in storeFileNames {
+                let source = directory.appendingPathComponent(name)
+                guard fileManager.fileExists(atPath: source.path) else { continue }
+                try fileManager.copyItem(at: source, to: destination.appendingPathComponent(name))
+            }
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            try stamp.write(to: destination.appendingPathComponent("backup_date.txt"), atomically: true, encoding: .utf8)
+        } catch {
+            // Never block startup or a mode switch because a copy failed.
+        }
+    }
+}
