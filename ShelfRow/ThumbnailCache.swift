@@ -257,6 +257,13 @@ final class ThumbnailCache {
     nonisolated static func extractThumbnailToDiskCache(
         for request: ThumbnailRequest
     ) -> (image: NSImage?, fileWasReachable: Bool) {
+        // Another Mac may have done this already. Copying its answer off the
+        // share costs one small read; opening the archive costs a decompression
+        // and a pass over the pages to pick a cover.
+        if let fromDistribution = thumbnailFromDistributionFolder(forItemID: request.itemID) {
+            return (fromDistribution, true)
+        }
+
         var resolvedURL: URL? = nil
         var securityAnchor: URL? = nil
 
@@ -328,6 +335,25 @@ final class ThumbnailCache {
         }
 
         return (thumbnail, true)
+    }
+
+    /// Copies one cover out of the NAS distribution folder, if it holds it.
+    ///
+    /// Answers nil for every reason — no folder chosen, share not mounted, that
+    /// book not there yet — because all of them mean the same thing here: carry
+    /// on and generate it. The bookkeeping row is not written from here; the next
+    /// distribution pass adopts the file it finds (`adoptLocalFiles`), which keeps
+    /// this path free of the store.
+    nonisolated private static func thumbnailFromDistributionFolder(forItemID itemID: UUID) -> NSImage? {
+        guard let root = ThumbnailDistribution.currentRoot else { return nil }
+        let localFile = thumbnailCacheDirectory.appendingPathComponent("\(itemID.uuidString).jpg")
+
+        do {
+            _ = try ThumbnailDistribution.download(forItemID: itemID, from: root, to: localFile)
+        } catch {
+            return nil
+        }
+        return loadCachedThumbnail(at: localFile)
     }
 
     /// Generates covers for a whole batch of items, several at a time.

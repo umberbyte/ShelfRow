@@ -149,6 +149,7 @@ struct ShelfRowApp: App {
 
     @State private var libraryStore = LibraryStore()
     @State private var cloudAccount = CloudAccountMonitor()
+    @State private var thumbnailDistribution = ThumbnailDistributionCoordinator()
 
     var body: some Scene {
         WindowGroup {
@@ -156,6 +157,7 @@ struct ShelfRowApp: App {
                 .preferredColorScheme(appearanceMode.colorScheme)
                 .environment(libraryStore)
                 .environment(cloudAccount)
+                .environment(thumbnailDistribution)
                 .task { watchAccount() }
         }
         .modelContainer(libraryStore.container)
@@ -168,6 +170,7 @@ struct ShelfRowApp: App {
                 .preferredColorScheme(appearanceMode.colorScheme)
                 .environment(libraryStore)
                 .environment(cloudAccount)
+                .environment(thumbnailDistribution)
         }
         .modelContainer(libraryStore.container)
         #endif
@@ -185,5 +188,7 @@ struct ShelfRowApp: App {
         if libraryStore.consumePendingCloudPurge() {
             Task { await cloudAccount.purgeCloudStorage() }
         }
+
+        thumbnailDistribution.attach(to: libraryStore.container)
     }
 }

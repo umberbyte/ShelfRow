@@ -106,7 +106,7 @@ final class LibraryStore {
 
     init() {
         if Self.isRunningTests {
-            let schema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self])
+            let schema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self, LocalBookmark.self, LocalCoverState.self])
             guard let scratch = try? ModelContainer(
                 for: schema,
                 configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
@@ -307,7 +307,7 @@ final class LibraryStore {
 
         let directory = try StoreFileBackup.storeDirectory()
         let librarySchema = Schema([Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self])
-        let localSchema = Schema([LocalBookmark.self])
+        let localSchema = Schema([LocalBookmark.self, LocalCoverState.self])
 
         let library = ModelConfiguration(
             "Library",

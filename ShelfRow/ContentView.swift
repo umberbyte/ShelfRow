@@ -148,6 +148,8 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(LibraryStore.self) private var libraryStore
+    @Environment(ThumbnailDistributionCoordinator.self) private var thumbnailDistribution
 
     // DB Queries
     @Query(sort: \Item.title) private var allItems: [Item]
@@ -349,6 +351,21 @@ struct ContentView: View {
         ]
     }
 
+    /// What the fetch would cost, and the one thing that could stop it.
+    private var thumbnailDistributionOfferMessage: String {
+        guard let offer = thumbnailDistribution.pendingOffer else { return "" }
+        let megabytes = Double(offer.bytes) / 1_048_576
+        let size = offer.bytes > 0 ? "・約 \(String(format: "%.0f", megabytes)) MB" : ""
+        let room = offer.hasRoom
+            ? ""
+            : "\n\n取得先の空き容量が足りません。空きを作ってからお試しください。"
+        return """
+            \(offer.count.formatted())件\(size)のサムネイルをNASの配布元から取得します。\
+            取得中も蔵書は閲覧できます。
+            「表示に応じて取得のみ」を選ぶと、一括取得はせず、画面に出た本の分だけを取り込みます。\(room)
+            """
+    }
+
     var body: some View {
         ZStack {
             if isLocked {
@@ -425,10 +442,33 @@ struct ContentView: View {
                     Text("書籍ファイルが移動・削除されているか、アクセス権がありません。「ボリューム管理」で親ボリュームのフォルダを再割り当てすると、アクセス権が保存されます。\n\n" + missingFileDetail)
                 }
         )
+        // Its own host for the same reason as the alert above: SwiftUI honors one
+        // .alert per view.
+        .background(
+            Color.clear
+                .alert("サムネイルを取得しますか？", isPresented: Binding(
+                    get: { thumbnailDistribution.pendingOffer != nil },
+                    set: { if !$0 { thumbnailDistribution.deferPendingFetch() } }
+                )) {
+                    Button("今すぐ取得") { thumbnailDistribution.acceptPendingFetch() }
+                        .disabled(thumbnailDistribution.pendingOffer?.hasRoom == false)
+                    Button("後で", role: .cancel) { thumbnailDistribution.deferPendingFetch() }
+                    Button("表示に応じて取得のみ") { thumbnailDistribution.declineBulkFetching() }
+                } message: {
+                    Text(thumbnailDistributionOfferMessage)
+                }
+        )
         .overlay {
             if isImporting {
                 importProgressOverlay
             }
+        }
+        .task(id: libraryStore.mode) {
+            // Away from the NAS this finds nothing to do and says nothing about
+            // it, which is the point: not being able to reach the share is the
+            // normal state of a laptop, not a fault to report.
+            try? await Task.sleep(for: .seconds(5))
+            await thumbnailDistribution.considerAutomaticWork(isPrimary: !libraryStore.isReplica)
         }
         .onAppear {
             // Apply security lock if enabled

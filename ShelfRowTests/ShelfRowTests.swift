@@ -587,3 +587,86 @@ struct CloudSyncRetryTests {
         #expect(CloudAccountMonitor.retryInterval(for: nil) == nil)
     }
 }
+
+/// The NAS folder thumbnails are handed around through.
+struct ThumbnailDistributionTests {
+
+
+    @Test func aThumbnailIsFiledUnderTheFirstTwoCharactersOfItsIdentifier() {
+        let root = URL(fileURLWithPath: "/Volumes/NAS/ShelfRowThumbnails", isDirectory: true)
+        let itemID = UUID(uuidString: "AB12CD34-0000-4000-A000-000000000001")!
+        let url = ThumbnailDistribution.fileURL(forItemID: itemID, in: root)
+
+        #expect(url.lastPathComponent == "\(itemID.uuidString).jpg")
+        #expect(url.deletingLastPathComponent().lastPathComponent == "AB")
+    }
+
+    @Test func aFolderIsRecognisedOnlyOnceItHasBeenInitialised() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ShelfRowThumbnailsTest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // An ordinary folder is not a distribution root, and says so rather than
+        // being treated as an empty one.
+        #expect(ThumbnailDistribution.readMarker(in: root) == .failure(.notADistributionFolder))
+
+        let marker = try ThumbnailDistribution.initialiseRoot(at: root)
+        let readBack = try ThumbnailDistribution.readMarker(in: root).get()
+        // Not compared whole: the timestamp goes through ISO 8601, which does
+        // not carry the fraction of a second it was created with.
+        #expect(readBack.libraryID == marker.libraryID)
+        #expect(readBack.formatVersion == ThumbnailDistribution.formatVersion)
+        #expect(readBack.createdBy == marker.createdBy)
+    }
+
+    @Test func aFolderThatIsNotThereReadsAsUnreachableRatherThanWrong() {
+        let missing = URL(fileURLWithPath: "/Volumes/NotMounted-\(UUID().uuidString)", isDirectory: true)
+        #expect(ThumbnailDistribution.readMarker(in: missing) == .failure(.unreachable))
+    }
+
+    @Test func aThumbnailSurvivesTheRoundTripThroughTheFolder() throws {
+        let fileManager = FileManager.default
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ShelfRowTransferTest-\(UUID().uuidString)", isDirectory: true)
+        let root = scratch.appendingPathComponent("root", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: scratch) }
+
+        let itemID = UUID()
+        let source = scratch.appendingPathComponent("source.jpg")
+        let payload = Data("not really a jpeg, but bytes are bytes".utf8)
+        try payload.write(to: source)
+
+        try ThumbnailDistribution.upload(from: source, forItemID: itemID, to: root)
+        #expect(fileManager.fileExists(atPath: ThumbnailDistribution.fileURL(forItemID: itemID, in: root).path))
+
+        let destination = scratch.appendingPathComponent("fetched.jpg")
+        let bytes = try ThumbnailDistribution.download(forItemID: itemID, from: root, to: destination)
+        #expect(bytes == payload.count)
+        #expect(try Data(contentsOf: destination) == payload)
+
+        // Writing over an existing one is the ordinary case: a cover was redone.
+        try ThumbnailDistribution.upload(from: source, forItemID: itemID, to: root)
+    }
+
+    @Test func aTornDownloadIsNotLeftBehindAsATemporaryFile() throws {
+        let fileManager = FileManager.default
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ShelfRowMissingTest-\(UUID().uuidString)", isDirectory: true)
+        let root = scratch.appendingPathComponent("root", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: scratch) }
+
+        let destination = scratch.appendingPathComponent("fetched.jpg")
+        #expect(throws: (any Error).self) {
+            try ThumbnailDistribution.download(forItemID: UUID(), from: root, to: destination)
+        }
+        #expect(!fileManager.fileExists(atPath: destination.path))
+    }
+
+    @Test func transferWidthStaysWithinWhatTheShareCanTake() {
+        #expect(ThumbnailTransfer.concurrencyRange.contains(ThumbnailTransfer.defaultConcurrency))
+        #expect(ThumbnailTransfer.concurrencyRange.lowerBound >= 1)
+    }
+}

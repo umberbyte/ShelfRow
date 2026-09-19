@@ -26,6 +26,48 @@ final class LocalBookmark {
         self.data = data
         self.updatedAt = updatedAt
     }
+
+    /// The row holding access to the thumbnail distribution folder.
+    ///
+    /// A fixed identifier rather than a `kind` column: the folder is one thing,
+    /// not a class of things, and a sentinel costs no schema change. Colliding
+    /// with a real `Item.id` or `Volume.id` is not a possibility worth code.
+    static let thumbnailRootID = UUID(uuidString: "5A0E7B3C-0000-4000-A000-000000000001")!
+}
+
+/// Which version of a book's thumbnail this device has a file for.
+///
+/// Thumbnails are covers — copyrighted artwork — so they never go to iCloud, and
+/// they are large enough that a device should not fetch one twice. What travels
+/// through iCloud is `Item.coverVersion`, an integer; comparing it against the
+/// version recorded here is the whole of the difference calculation, which is why
+/// nothing has to enumerate twenty thousand files over a network share.
+///
+/// Device-specific, so it belongs in the local store and nowhere near the
+/// synced one.
+@Model
+final class LocalCoverState {
+    var itemID: UUID = UUID()
+    /// The `Item.coverVersion` this device holds the file for. 0 means none.
+    var version: Int = 0
+    var bytes: Int = 0
+    var updatedAt: Date = Date()
+    /// Generated here but not yet written to the distribution folder, because the
+    /// NAS was not reachable at the time. Being away from it is ordinary, so this
+    /// waits rather than failing.
+    var pendingUpload: Bool = false
+    /// Consecutive failures for the version being fetched. Three is where this
+    /// device stops asking until the version changes.
+    var attempts: Int = 0
+    var lastErrorCode: Int = 0
+
+    init(itemID: UUID, version: Int = 0, bytes: Int = 0, pendingUpload: Bool = false) {
+        self.itemID = itemID
+        self.version = version
+        self.bytes = bytes
+        self.pendingUpload = pendingUpload
+        self.updatedAt = Date()
+    }
 }
 
 /// The app's bookmarks, kept in memory and written through to the local store.

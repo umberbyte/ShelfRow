@@ -5,6 +5,7 @@
 //  Created by Go Sugawara on 2026/09/16.
 //
 
+import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1209,6 +1210,10 @@ struct SecuritySettingsView: View {
 
 // MARK: - 6. Maintenance Pane
 struct MaintenanceSettingsView: View {
+    @Environment(ThumbnailDistributionCoordinator.self) private var thumbnails
+    @Environment(LibraryStore.self) private var libraryStore
+    @Query private var volumes: [Volume]
+
     @AppStorage("backupEnabled") private var backupEnabled = false
     @AppStorage("backupFolderPath") private var backupFolderPath = ""
     @AppStorage("backupFolderBookmark") private var backupFolderBookmark = ""
@@ -1226,6 +1231,8 @@ struct MaintenanceSettingsView: View {
             )
 
             backupSection
+
+            thumbnailDistributionSection
 
             PreferencesPanel {
                 maintenanceRow(
@@ -1256,6 +1263,175 @@ struct MaintenanceSettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The NAS folder thumbnails are handed around through.
+    ///
+    /// Covers are not sent to iCloud — they are copyrighted artwork, and a
+    /// library's worth is around a gigabyte — so a second Mac would otherwise
+    /// have to open every archive again to see a single cover. The books already
+    /// live on a share; a folder beside them is the cheap way across.
+    private var thumbnailDistributionSection: some View {
+        PreferencesPanel {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Image(systemName: "photo.stack")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                        .frame(width: 34, height: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(Color.accentColor.opacity(0.12))
+                        )
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("サムネイルの配布")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("NAS上のフォルダを経由して、各Macがサムネイルを取得します。iCloudには送りません。")
+                            .font(PreferencesLayout.smallCaptionFont)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Toggle("自動取得", isOn: Binding(
+                        get: { thumbnails.autoFetchEnabled },
+                        set: { thumbnails.autoFetchEnabled = $0 }
+                    ))
+                    .font(PreferencesLayout.bodyFont)
+                }
+
+                HStack(spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder")
+                            .foregroundStyle(.secondary)
+                        Text(thumbnails.status.message)
+                            .font(PreferencesLayout.bodyFont)
+                            .foregroundStyle(thumbnails.status.isReady ? .primary : .secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(NSColor.separatorColor).opacity(0.7)))
+
+                    Button("選択...") { selectThumbnailRoot() }
+                        .controlSize(.large)
+                        .disabled(thumbnails.isRunning)
+
+                    if thumbnails.status != .notChosen {
+                        Button("解除") { thumbnails.forgetRoot() }
+                            .controlSize(.large)
+                            .disabled(thumbnails.isRunning)
+                    }
+                }
+
+                if let counts = thumbnails.counts {
+                    Text("""
+                        取得済み \(counts.held.formatted())件 / 未取得 \(counts.missing.formatted())件 \
+                        / 未登録 \(counts.toUpload.formatted())件\(counts.failed > 0 ? " / 失敗 \(counts.failed.formatted())件" : "")
+                        """)
+                        .font(PreferencesLayout.smallCaptionFont)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let activity = thumbnails.activity {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
+                        Text(activity.total > 0
+                             ? "\(activity.kind.label) \(activity.done.formatted()) / \(activity.total.formatted())"
+                             : activity.kind.label)
+                            .font(PreferencesLayout.bodyFont)
+                        Spacer()
+                        Button("中止") { thumbnails.cancelRun() }
+                            .controlSize(.large)
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 18) {
+                        Button("配布元からサムネイルを取得") { thumbnails.fetchEverything() }
+                            .controlSize(.large)
+                            .disabled(!thumbnails.status.isReady)
+                            .frame(width: 240, alignment: .leading)
+
+                        Text("この端末に無いサムネイルを配布元から取り込みます。中断しても、次回は残りだけが対象になります。")
+                            .font(PreferencesLayout.captionFont)
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    // Filling the folder is the first device's job: two Macs
+                    // extracting the same twenty thousand archives would only
+                    // spend the NAS twice over.
+                    if !libraryStore.isReplica {
+                        HStack(alignment: .top, spacing: 18) {
+                            Button("サムネイルを配布元へ登録") { thumbnails.uploadEverything() }
+                                .controlSize(.large)
+                                .disabled(!thumbnails.status.isReady)
+                                .frame(width: 240, alignment: .leading)
+
+                            Text("この端末が持っているサムネイルを配布元へコピーし、他の端末が取得できるようにします。書誌情報の更新を伴うため、iCloudへの再送信が発生します。")
+                                .font(PreferencesLayout.captionFont)
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Text("同時転送数")
+                        .font(PreferencesLayout.bodyFont)
+                    Stepper(
+                        value: Binding(get: { thumbnails.concurrency }, set: { thumbnails.concurrency = $0 }),
+                        in: ThumbnailTransfer.concurrencyRange
+                    ) {
+                        Text("\(thumbnails.concurrency)")
+                            .font(PreferencesLayout.bodyFont)
+                            .monospacedDigit()
+                    }
+                    .disabled(thumbnails.isRunning)
+
+                    Text("小さなファイルの転送は待ち時間が支配的なので、数本並べた方が速くなります。NASの反応が鈍るなら下げてください。")
+                        .font(PreferencesLayout.captionFont)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let message = thumbnails.lastMessage {
+                    Text(message)
+                        .font(PreferencesLayout.smallCaptionFont)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .task { await thumbnails.refreshCounts() }
+    }
+
+    /// Asks for the folder, offering the one beside the books.
+    private func selectThumbnailRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "選択"
+        panel.message = "サムネイルの配布元フォルダを選んでください（NAS上の、書籍と同じ共有内を推奨）。"
+
+        if let volumePath = volumes.first(where: { !$0.lastKnownPath.isEmpty })?.lastKnownPath {
+            panel.directoryURL = URL(fileURLWithPath: volumePath, isDirectory: true)
+            panel.nameFieldStringValue = ThumbnailDistribution.folderName
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        thumbnails.adoptRoot(at: url, initialiseIfNeeded: !libraryStore.isReplica)
     }
 
     private var backupSection: some View {
