@@ -9,7 +9,7 @@ import SwiftUI
 import SwiftData
 import OSLog
 
-private let windowLifecycleLogger = Logger(subsystem: "jp.aromatics.ShelfRow", category: "WindowLifecycle")
+private let windowLifecycleLogger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "WindowLifecycle")
 
 enum AppAppearanceMode: String, CaseIterable, Identifiable {
     case system

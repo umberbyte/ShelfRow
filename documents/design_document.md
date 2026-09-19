@@ -191,7 +191,7 @@ ShelfRow ではこの思想を次の仕様として継承する。
 ```
 
 1.  **物理コピー（インポートフェーズ）＋一括移行:**
-    XMLインポート時に `item.legacyID` を手がかりに旧 `thumbnail.jpg` を `Caches/jp.aromatics.ShelfRow/Thumbnails/[item.id].jpg` へコピーする。**サンドボックス下では旧アプリフォルダへ直接アクセスできないため、`NSOpenPanel` で「Stackroom Library」フォルダをユーザーに選ばせ、security-scoped URL を経由**する。既存アイテムにも後から適用できるよう、⚙️「Stackroomサムネイルの移行...」を別途提供。
+    XMLインポート時に `item.legacyID` を手がかりに旧 `thumbnail.jpg` を `Caches/<bundle identifier>/Thumbnails/[item.id].jpg` へコピーする。**サンドボックス下では旧アプリフォルダへ直接アクセスできないため、`NSOpenPanel` で「Stackroom Library」フォルダをユーザーに選ばせ、security-scoped URL を経由**する。既存アイテムにも後から適用できるよう、⚙️「Stackroomサムネイルの移行...」を別途提供。
 2.  **オンデマンド抽出（JITフェーズ）＋カバー選定:**
     旧サムネイルが無い場合、表示要求時にバックグラウンドでZIP/フォルダ内の画像を列挙し、`CoverSelector.preferredCoverData` により表紙データを選ぶ。基本は**「末尾の数字だけが異なる連番グループのうち最大グループの最小番号」**を採用するが、その画像がモノクロの場合は、名前順で最初の縦長かつ非モノクロ画像へフォールバックする（カラー表紙が `P001.jpg`、本文連番が `P007.png` 以降のような雑誌ZIPに対応）。破損画像は事前チェックとデコード失敗時のスキップで回避する。ZIPの読み出しは純Swiftの `ZipExtractor`（子プロセス不使用）で行う。
 3.  **高速ダウンスケーリング:**

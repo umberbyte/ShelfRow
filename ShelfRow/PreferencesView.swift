@@ -1285,7 +1285,7 @@ enum ShelfRowBackupManager {
         }
 
         if let library = fileManager.urls(for: .libraryDirectory, in: .userDomainMask).first {
-            let bundleID = Bundle.main.bundleIdentifier ?? "jp.aromatics.ShelfRow"
+            let bundleID = ThumbnailCache.appIdentifier
             let preferences = library
                 .appendingPathComponent("Preferences", isDirectory: true)
                 .appendingPathComponent("\(bundleID).plist")

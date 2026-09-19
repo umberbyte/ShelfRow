@@ -38,11 +38,7 @@ actor LibraryImporter {
     }
     
     private var cacheDirectory: URL {
-        let paths = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-        let appCache = paths[0].appendingPathComponent("jp.aromatics.ShelfRow", isDirectory: true)
-        let thumbs = appCache.appendingPathComponent("Thumbnails", isDirectory: true)
-        try? FileManager.default.createDirectory(at: thumbs, withIntermediateDirectories: true, attributes: nil)
-        return thumbs
+        ThumbnailCache.diskCacheDirectory
     }
     
     /// Performs the library import on a background thread with real-time progress callbacks and Merge strategy.

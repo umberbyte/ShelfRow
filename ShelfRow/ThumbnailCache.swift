@@ -11,7 +11,7 @@ import ImageIO
 import OSLog
 import QuickLookThumbnailing
 
-private let thumbnailLogger = Logger(subsystem: "jp.aromatics.ShelfRow", category: "Thumbnails")
+private let thumbnailLogger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "Thumbnails")
 
 @globalActor
 actor ThumbnailCacheActor {
@@ -104,7 +104,7 @@ private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
 /// grid of cells cannot spawn a thread each, and separate from the queue doing
 /// archive extraction, so a cheap read never waits behind an expensive one.
 private let thumbnailReadQueue = DispatchQueue(
-    label: "jp.aromatics.ShelfRow.thumbnail-read",
+    label: "\(ThumbnailCache.appIdentifier).thumbnail-read",
     qos: .userInitiated
 )
 
@@ -139,14 +139,43 @@ final class ThumbnailCache {
     private var inFlightLoads: [UUID: Task<NSImage?, Never>] = [:]
     private var prefetchTask: Task<Void, Never>?
 
+    /// This app's own identifier, used to namespace its Caches subdirectory and its
+    /// log subsystems. Not "jp.aromatics" — that identifier belongs to Stackroom's
+    /// author, copied in by mistake, never this app's.
+    nonisolated static let appIdentifier = Bundle.main.bundleIdentifier ?? "com.eureka.ShelfRow"
+
     /// Shared thumbnails disk-cache location (also used by the importer and
     /// the legacy thumbnail migration).
     nonisolated static var diskCacheDirectory: URL {
-        let paths = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-        let appCache = paths[0].appendingPathComponent("jp.aromatics.ShelfRow", isDirectory: true)
+        let appCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(appIdentifier, isDirectory: true)
         let thumbs = appCache.appendingPathComponent("Thumbnails", isDirectory: true)
+
+        migrateFromMisnamedCacheDirectoryIfNeeded(to: thumbs)
+
         try? FileManager.default.createDirectory(at: thumbs, withIntermediateDirectories: true, attributes: nil)
         return thumbs
+    }
+
+    /// One-time move from the "jp.aromatics.ShelfRow" Caches folder builds before
+    /// this fix used, so existing thumbnails carry forward instead of silently
+    /// starting over — bulk generation's per-book completion record lives in
+    /// SwiftData, not here, and would otherwise believe everything is already
+    /// generated while every thumbnail file had effectively vanished.
+    nonisolated private static func migrateFromMisnamedCacheDirectoryIfNeeded(to thumbs: URL) {
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: thumbs.path) else { return }
+
+        let legacyThumbs = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("jp.aromatics.ShelfRow", isDirectory: true)
+            .appendingPathComponent("Thumbnails", isDirectory: true)
+        guard fileManager.fileExists(atPath: legacyThumbs.path) else { return }
+
+        try? fileManager.createDirectory(
+            at: thumbs.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? fileManager.moveItem(at: legacyThumbs, to: thumbs)
     }
 
     private init() {}

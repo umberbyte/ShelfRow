@@ -60,7 +60,7 @@ struct CoverExtractionOutcomes: Sendable {
 /// batch of them never lands on the thread drawing the UI.
 @ModelActor
 actor CoverExtractionStore {
-    private static let logger = Logger(subsystem: "jp.aromatics.ShelfRow", category: "CoverExtraction")
+    private static let logger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "CoverExtraction")
 
     /// The books generation has already been run against, whatever came of it.
     func attemptedItemIDs() -> Set<UUID> {
