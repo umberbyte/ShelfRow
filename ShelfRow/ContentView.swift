@@ -154,7 +154,7 @@ struct ContentView: View {
     @Query(sort: \Shelf.title) private var shelves: [Shelf]
 
     // AppStorage Settings (Customizable metadata labels; empty = classic default)
-    @AppStorage("compactSidePanes") private var compactSidePanes = false
+    @AppStorage("compactDisplay") private var compactDisplay = false
     @AppStorage("typeNameThickBook") private var thickBook = ""
     @AppStorage("typeNameThinBook") private var thinBook = ""
     @AppStorage("typeNamePartBook") private var partBook = ""
@@ -305,11 +305,11 @@ struct ContentView: View {
         Color(NSColor.tertiaryLabelColor)
     }
 
-    /// Sizes for the sidebar and the inspector. The middle pane is left alone:
-    /// it is the one that absorbs a window's width, and its rows are already as
-    /// tight as the columns allow.
-    private var paneMetrics: PaneMetrics {
-        PaneMetrics(isCompact: compactSidePanes)
+    /// Sizes for everything around the book list: the side panes and the
+    /// toolbar above it. The list's own rows are left alone — they are already
+    /// as tight as the columns allow, and they are what the space is for.
+    private var displayMetrics: DisplayMetrics {
+        DisplayMetrics(isCompact: compactDisplay)
     }
 
     private var inspectorTextColor: Color {
@@ -363,9 +363,9 @@ struct ContentView: View {
                     HSplitView {
                         sidebarPane
                             .frame(
-                                minWidth: paneMetrics.size(240),
-                                idealWidth: paneMetrics.size(260),
-                                maxWidth: paneMetrics.size(360)
+                                minWidth: displayMetrics.size(240),
+                                idealWidth: displayMetrics.size(260),
+                                maxWidth: displayMetrics.size(360)
                             )
                             .background(SplitViewAutosave(name: "ShelfRow.MainSplitView"))
 
@@ -374,16 +374,16 @@ struct ContentView: View {
 
                         detailPane
                             .frame(
-                                minWidth: paneMetrics.size(300),
-                                idealWidth: paneMetrics.size(320),
-                                maxWidth: paneMetrics.size(440)
+                                minWidth: displayMetrics.size(300),
+                                idealWidth: displayMetrics.size(320),
+                                maxWidth: displayMetrics.size(440)
                             )
                     }
                 }
                 .background(modernSurfaceColor)
             }
         }
-        .frame(minWidth: paneMetrics.size(240) + 620 + paneMetrics.size(300), minHeight: 680)
+        .frame(minWidth: displayMetrics.size(240) + 620 + displayMetrics.size(300), minHeight: 680)
         .sheet(isPresented: $showVolumeManager) {
             VolumeRelocationView(isPresented: $showVolumeManager)
         }
@@ -496,60 +496,60 @@ struct ContentView: View {
 
     // MARK: - Modern Main Header
     private var modernMainHeader: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .center, spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: displayMetrics.space(18)) {
+            HStack(alignment: .center, spacing: displayMetrics.space(16)) {
+                VStack(alignment: .leading, spacing: displayMetrics.space(2)) {
                     Text(currentCollectionTitle)
-                        .font(.system(size: 21, weight: .bold))
+                        .font(displayMetrics.font(21, weight: .bold))
                         .foregroundStyle(primaryTextColor)
                     Text("\(displayItems.count.formatted()) 項目")
-                        .font(.system(size: 13))
+                        .font(displayMetrics.font(13))
                         .foregroundStyle(secondaryTextColor)
                 }
 
-                Spacer(minLength: 16)
+                Spacer(minLength: displayMetrics.space(16))
 
                 viewModeSwitcher
 
                 Menu {
                     sortMenuItems
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: displayMetrics.space(8)) {
                         Image(systemName: sortAscending ? "arrow.up.arrow.down" : "arrow.down.arrow.up")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(displayMetrics.font(16, weight: .semibold))
                         Text("並び替え")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(displayMetrics.font(13, weight: .semibold))
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(displayMetrics.font(10, weight: .bold))
                             .foregroundStyle(isGridView ? secondaryTextColor : tertiaryTextColor)
                     }
                     .foregroundStyle(isGridView ? primaryTextColor : tertiaryTextColor)
                 }
                 .menuStyle(.borderlessButton)
                 .disabled(!isGridView)
-                .frame(width: 116, height: 36, alignment: .center)
+                .frame(width: displayMetrics.size(116), height: displayMetrics.size(36), alignment: .center)
                 .background(headerControlBackground)
                 .contentShape(Rectangle())
 
-                HStack(spacing: 8) {
+                HStack(spacing: displayMetrics.space(8)) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 15))
+                        .font(displayMetrics.font(15))
                         .foregroundStyle(secondaryTextColor)
                     TextField("検索", text: $searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 14))
+                        .font(displayMetrics.font(14))
                         .foregroundStyle(primaryTextColor)
                 }
-                .padding(.horizontal, 12)
-                .frame(width: 300, height: 36)
+                .padding(.horizontal, displayMetrics.space(12))
+                .frame(width: displayMetrics.size(300), height: displayMetrics.size(36))
                 .background(headerControlBackground)
             }
 
             classicFilterSegments
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 18)
-        .padding(.bottom, 16)
+        .padding(.horizontal, displayMetrics.space(20))
+        .padding(.top, displayMetrics.space(18))
+        .padding(.bottom, displayMetrics.space(16))
         .background(
             LinearGradient(
                 colors: [
@@ -572,7 +572,7 @@ struct ContentView: View {
     }
 
     private var viewModeSwitcher: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: displayMetrics.space(4)) {
             viewModeButton(title: "リスト", icon: "list.bullet", isSelected: !isGridView) {
                 isGridView = false
             }
@@ -580,8 +580,8 @@ struct ContentView: View {
                 isGridView = true
             }
         }
-        .padding(4)
-        .frame(height: 42)
+        .padding(displayMetrics.space(4))
+        .frame(height: displayMetrics.size(42))
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(controlFillColor)
@@ -594,14 +594,14 @@ struct ContentView: View {
 
     private func viewModeButton(title: String, icon: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 7) {
+            HStack(spacing: displayMetrics.space(7)) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(displayMetrics.font(15, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(displayMetrics.font(13, weight: .semibold))
             }
             .foregroundStyle(isSelected ? .white : primaryTextColor)
-            .frame(width: 86, height: 34)
+            .frame(width: displayMetrics.size(86), height: displayMetrics.size(34))
             .background(
                 RoundedRectangle(cornerRadius: 9)
                     .fill(isSelected ? Color.accentColor : Color.clear)
@@ -613,26 +613,26 @@ struct ContentView: View {
 
     // MARK: - Modern Filter Segments (未読 / レート / 種類, multi-selectable)
     private var classicFilterSegments: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 14) {
-                filterSegment(isSelected: unreadFilterSelection == 1, minWidth: 86) {
+        VStack(alignment: .leading, spacing: displayMetrics.space(12)) {
+            HStack(spacing: displayMetrics.space(14)) {
+                filterSegment(isSelected: unreadFilterSelection == 1, minWidth: displayMetrics.size(86)) {
                     unreadFilterSelection = unreadFilterSelection == 1 ? 0 : 1
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: displayMetrics.space(8)) {
                         Circle()
                             .fill(Color.green)
-                            .frame(width: 14, height: 14)
+                            .frame(width: displayMetrics.size(14), height: displayMetrics.size(14))
                             .shadow(color: .green.opacity(0.55), radius: 5)
                             .accessibilityHidden(true)
                         Text("未読")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(displayMetrics.font(14, weight: .semibold))
                     }
                 }
 
                 verticalFilterSeparator
 
                 Text("種別")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(displayMetrics.font(13, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
 
                 filterTypeButton(index: nil, title: "すべて", isSelected: typeFilterSelection.isEmpty) {
@@ -650,15 +650,15 @@ struct ContentView: View {
                 }
             }
 
-            HStack(spacing: 14) {
+            HStack(spacing: displayMetrics.space(14)) {
                 verticalFilterSeparator
 
                 Text("評価")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(displayMetrics.font(13, weight: .medium))
                     .foregroundStyle(secondaryTextColor)
 
                 ForEach(1...5, id: \.self) { rate in
-                    filterSegment(isSelected: ratingFilterSelection.contains(rate), minWidth: 72) {
+                    filterSegment(isSelected: ratingFilterSelection.contains(rate), minWidth: displayMetrics.size(72)) {
                         if ratingFilterSelection.contains(rate) {
                             ratingFilterSelection.remove(rate)
                         } else {
@@ -678,10 +678,10 @@ struct ContentView: View {
                     searchText = ""
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 13, weight: .semibold))
+                .font(displayMetrics.font(13, weight: .semibold))
                 .foregroundStyle(primaryTextColor)
-                .padding(.horizontal, 18)
-                .frame(height: 36)
+                .padding(.horizontal, displayMetrics.space(18))
+                .frame(height: displayMetrics.size(36))
                 .background(headerControlBackground)
             }
         }
@@ -690,24 +690,24 @@ struct ContentView: View {
     private var verticalFilterSeparator: some View {
         Rectangle()
             .fill(separatorTintColor)
-            .frame(width: 1, height: 20)
+            .frame(width: 1, height: displayMetrics.size(20))
     }
 
     private func filterTypeButton(index: Int?, title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
-        filterSegment(isSelected: isSelected, minWidth: 78, action: action) {
-            HStack(spacing: 7) {
+        filterSegment(isSelected: isSelected, minWidth: displayMetrics.size(78), action: action) {
+            HStack(spacing: displayMetrics.space(7)) {
                 if let index {
                     Image(systemName: BookTypeInfo.systemImage(for: index))
-                        .font(.system(size: 15))
+                        .font(displayMetrics.font(15))
                         .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(BookTypeInfo.color(for: index))
                 } else {
                     Image(systemName: "books.vertical.fill")
-                        .font(.system(size: 15))
+                        .font(displayMetrics.font(15))
                         .foregroundStyle(.yellow)
                 }
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(displayMetrics.font(13, weight: .semibold))
             }
         }
         .help(title)
@@ -715,12 +715,12 @@ struct ContentView: View {
 
     /// A compact star-with-number label used by the rating filter (★1 … ★5).
     private func starRow(count: Int, filled: Bool) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: displayMetrics.space(4)) {
             Image(systemName: "star.fill")
-                .font(.system(size: 14, weight: .bold))
+                .font(displayMetrics.font(14, weight: .bold))
                 .foregroundStyle(filled ? .white : Color.yellow)
             Text("\(count)")
-                .font(.system(size: 14, weight: .bold))
+                .font(displayMetrics.font(14, weight: .bold))
                 .foregroundStyle(filled ? .white : primaryTextColor)
         }
     }
@@ -731,7 +731,7 @@ struct ContentView: View {
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, 14)
-                .frame(minWidth: minWidth, minHeight: 36)
+                .frame(minWidth: minWidth, minHeight: displayMetrics.size(36))
                 .background(
                     Capsule()
                         .fill(isSelected ? Color.accentColor : controlFillColor)
@@ -809,19 +809,19 @@ struct ContentView: View {
     // MARK: - Sidebar Pane
     private var sidebarPane: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: paneMetrics.space(18)) {
-                HStack(spacing: paneMetrics.space(12)) {
+            VStack(alignment: .leading, spacing: displayMetrics.space(18)) {
+                HStack(spacing: displayMetrics.space(12)) {
                     Image(nsImage: NSApplication.shared.applicationIconImage)
                         .resizable()
                         .scaledToFit()
-                        .frame(width: paneMetrics.size(28), height: paneMetrics.size(28))
+                        .frame(width: displayMetrics.size(28), height: displayMetrics.size(28))
                         .accessibilityHidden(true)
                     Text("ShelfRow")
-                        .font(paneMetrics.font(22, weight: .bold))
+                        .font(displayMetrics.font(22, weight: .bold))
                         .foregroundStyle(primaryTextColor)
                 }
-                .padding(.top, paneMetrics.space(18))
-                .padding(.horizontal, paneMetrics.space(20))
+                .padding(.top, displayMetrics.space(18))
+                .padding(.horizontal, displayMetrics.space(20))
             }
 
             ScrollViewReader { sidebarProxy in
@@ -938,9 +938,9 @@ struct ContentView: View {
                     }
                 } label: {
                     Image(systemName: "plus.circle.fill")
-                        .font(paneMetrics.font(19, weight: .semibold))
+                        .font(displayMetrics.font(19, weight: .semibold))
                         .foregroundStyle(primaryTextColor)
-                        .frame(width: paneMetrics.size(38), height: paneMetrics.size(32))
+                        .frame(width: displayMetrics.size(38), height: displayMetrics.size(32))
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("シェルフを追加")
@@ -950,9 +950,9 @@ struct ContentView: View {
 
                 SettingsLink {
                     Image(systemName: "gearshape")
-                        .font(paneMetrics.font(15, weight: .semibold))
+                        .font(displayMetrics.font(15, weight: .semibold))
                         .foregroundStyle(primaryTextColor)
-                        .frame(width: paneMetrics.size(38), height: paneMetrics.size(32))
+                        .frame(width: displayMetrics.size(38), height: displayMetrics.size(32))
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("環境設定")
@@ -962,8 +962,8 @@ struct ContentView: View {
 
                 Spacer()
             }
-            .padding(.horizontal, paneMetrics.space(8))
-            .padding(.vertical, paneMetrics.space(7))
+            .padding(.horizontal, displayMetrics.space(8))
+            .padding(.vertical, displayMetrics.space(7))
             .background(subtleFillColor)
         }
         .background(
@@ -990,52 +990,52 @@ struct ContentView: View {
         } label: {
             label()
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(minHeight: paneMetrics.size(32), alignment: .center)
+                .frame(minHeight: displayMetrics.size(32), alignment: .center)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .listRowInsets(EdgeInsets(
-            top: paneMetrics.space(2),
-            leading: paneMetrics.space(10),
-            bottom: paneMetrics.space(2),
-            trailing: paneMetrics.space(10)
+            top: displayMetrics.space(2),
+            leading: displayMetrics.space(10),
+            bottom: displayMetrics.space(2),
+            trailing: displayMetrics.space(10)
         ))
         .listRowBackground(
             RoundedRectangle(cornerRadius: 8)
                 .fill(sidebarSelection == selection ? Color.accentColor.opacity(0.95) : Color.clear)
-                .padding(.horizontal, paneMetrics.space(8))
-                .padding(.vertical, paneMetrics.space(2))
+                .padding(.horizontal, displayMetrics.space(8))
+                .padding(.vertical, displayMetrics.space(2))
         )
     }
 
     private func sidebarSectionHeader(_ title: String) -> some View {
         Text(title)
-            .font(paneMetrics.font(12, weight: .semibold))
+            .font(displayMetrics.font(12, weight: .semibold))
             .foregroundStyle(isDarkAppearance ? Color.white.opacity(0.74) : .black)
     }
 
     private func sidebarLibraryLabel(_ title: String, systemImage: String, count: Int) -> some View {
-        HStack(spacing: paneMetrics.space(10)) {
+        HStack(spacing: displayMetrics.space(10)) {
             Image(systemName: systemImage)
-                .font(paneMetrics.font(17, weight: .medium))
+                .font(displayMetrics.font(17, weight: .medium))
                 .foregroundStyle(systemImage == "circle.fill" ? .green : secondaryTextColor)
-                .frame(width: paneMetrics.size(22))
+                .frame(width: displayMetrics.size(22))
             Text(title)
-                .font(paneMetrics.font(14, weight: .semibold))
+                .font(displayMetrics.font(14, weight: .semibold))
                 .foregroundStyle(primaryTextColor)
             Spacer()
             countBadge(count)
         }
-        .padding(.horizontal, paneMetrics.space(8))
-        .padding(.vertical, paneMetrics.space(6))
+        .padding(.horizontal, displayMetrics.space(8))
+        .padding(.vertical, displayMetrics.space(6))
     }
 
     private func countBadge(_ count: Int) -> some View {
         Text(count.formatted())
-            .font(paneMetrics.font(12, weight: .bold))
+            .font(displayMetrics.font(12, weight: .bold))
             .foregroundStyle(.white)
-            .padding(.horizontal, paneMetrics.space(9))
-            .padding(.vertical, paneMetrics.space(3))
+            .padding(.horizontal, displayMetrics.space(9))
+            .padding(.vertical, displayMetrics.space(3))
             .background(Capsule().fill(isDarkAppearance ? Color.white.opacity(0.14) : Color.black.opacity(0.28)))
     }
 
@@ -1049,15 +1049,15 @@ struct ContentView: View {
     }
 
     private func shelfLabel(_ shelf: Shelf) -> some View {
-        HStack(spacing: paneMetrics.space(10)) {
+        HStack(spacing: displayMetrics.space(10)) {
             Image(systemName: shelf.type == 1 ? "gearshape" : BookTypeInfo.systemImage(for: shelf.icon))
                 .foregroundStyle(shelf.type == 1 ? .purple : BookTypeInfo.folderColor(forIcon: shelf.icon))
-                .font(paneMetrics.font(16, weight: .medium))
-                .frame(width: paneMetrics.size(22))
+                .font(displayMetrics.font(16, weight: .medium))
+                .frame(width: displayMetrics.size(22))
             if editingShelfID == shelf.id {
                 TextField("シェルフ名", text: $editingShelfTitle)
                     .textFieldStyle(.plain)
-                    .font(paneMetrics.font(14, weight: .semibold))
+                    .font(displayMetrics.font(14, weight: .semibold))
                     .foregroundStyle(primaryTextColor)
                     .accessibilityLabel("シェルフ名")
                     .focused($focusedShelfTitleID, equals: shelf.id)
@@ -1069,15 +1069,15 @@ struct ContentView: View {
                     }
             } else {
                 Text(shelf.title)
-                    .font(paneMetrics.font(14, weight: .semibold))
+                    .font(displayMetrics.font(14, weight: .semibold))
                     .lineLimit(1)
                     .foregroundStyle(primaryTextColor)
             }
             Spacer()
             countBadge(shelfItemCount(shelf))
         }
-        .padding(.horizontal, paneMetrics.space(8))
-        .padding(.vertical, paneMetrics.space(6))
+        .padding(.horizontal, displayMetrics.space(8))
+        .padding(.vertical, displayMetrics.space(6))
     }
 
     // MARK: - List Columns (shared by the header and each row for alignment)
@@ -1505,12 +1505,12 @@ struct ContentView: View {
 
     private func classicInspectorView(item: Item) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: paneMetrics.space(16)) {
+            VStack(alignment: .leading, spacing: displayMetrics.space(16)) {
                 // Large cover image on top
                 HStack {
                     Spacer()
                     CoverImageView(item: item)
-                        .frame(width: paneMetrics.size(176), height: paneMetrics.size(224))
+                        .frame(width: displayMetrics.size(176), height: displayMetrics.size(224))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
@@ -1519,27 +1519,27 @@ struct ContentView: View {
                         .shadow(color: .black.opacity(isDarkAppearance ? 0.35 : 0.16), radius: 12, x: 0, y: 6)
                     Spacer()
                 }
-                .padding(.top, paneMetrics.space(20))
+                .padding(.top, displayMetrics.space(20))
 
                 Text(item.title)
-                    .font(paneMetrics.font(18, weight: .bold))
+                    .font(displayMetrics.font(18, weight: .bold))
                     .foregroundStyle(inspectorTextColor)
                     .lineLimit(2)
-                    .padding(.horizontal, paneMetrics.space(20))
+                    .padding(.horizontal, displayMetrics.space(20))
 
                 Toggle("未読にする", isOn: Binding(
                     get: { item.isUnread },
                     set: { item.isUnread = $0 }
                 ))
                 .toggleStyle(.checkbox)
-                .font(paneMetrics.font(13))
+                .font(displayMetrics.font(13))
                 .foregroundStyle(inspectorTextColor)
-                .padding(.horizontal, paneMetrics.space(20))
+                .padding(.horizontal, displayMetrics.space(20))
 
-                Divider().overlay(separatorTintColor).padding(.horizontal, paneMetrics.space(20))
+                Divider().overlay(separatorTintColor).padding(.horizontal, displayMetrics.space(20))
 
                 // Form with customized labels from Customize Settings Tab!
-                VStack(spacing: paneMetrics.space(8)) {
+                VStack(spacing: displayMetrics.space(8)) {
                     inspectorFieldRow(label: "タイトル:", field: .title, text: Binding(
                         get: { item.title },
                         set: { item.title = $0 }
@@ -1552,9 +1552,9 @@ struct ContentView: View {
 
                     HStack {
                         Text("レート:")
-                            .font(paneMetrics.font(11))
+                            .font(displayMetrics.font(11))
                             .foregroundStyle(inspectorTextColor)
-                            .frame(width: paneMetrics.size(78), alignment: .trailing)
+                            .frame(width: displayMetrics.size(78), alignment: .trailing)
                         RatingView(rating: Binding(
                             get: { item.rating },
                             set: { item.rating = $0 }
@@ -1589,9 +1589,9 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 14)
 
-                Divider().overlay(separatorTintColor).padding(.horizontal, paneMetrics.space(20))
+                Divider().overlay(separatorTintColor).padding(.horizontal, displayMetrics.space(20))
 
-                VStack(alignment: .leading, spacing: paneMetrics.space(4)) {
+                VStack(alignment: .leading, spacing: displayMetrics.space(4)) {
                     Text("登録日: \(item.addedDate.formatted(date: .numeric, time: .omitted))")
                     if let lastRead = item.lastReadDate {
                         Text("読込日: \(lastRead.formatted(date: .numeric, time: .omitted))")
@@ -1600,30 +1600,30 @@ struct ContentView: View {
                         Text("ページ数: \(item.pages)p")
                     }
                 }
-                .font(paneMetrics.font(11))
+                .font(displayMetrics.font(11))
                 .foregroundStyle(inspectorTextColor)
-                .padding(.horizontal, paneMetrics.space(20))
+                .padding(.horizontal, displayMetrics.space(20))
             }
-            .padding(.bottom, paneMetrics.space(20))
+            .padding(.bottom, displayMetrics.space(20))
         }
         .background(modernPanelColor)
     }
 
     private func inspectorFieldRow(label: String, field: InspectorField, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: paneMetrics.space(4)) {
+        VStack(alignment: .leading, spacing: displayMetrics.space(4)) {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
-                    .font(paneMetrics.font(12))
+                    .font(displayMetrics.font(12))
                     .foregroundStyle(inspectorTextColor)
-                    .frame(width: paneMetrics.size(78), alignment: .trailing)
+                    .frame(width: displayMetrics.size(78), alignment: .trailing)
 
                 TextField("", text: text)
                     .textFieldStyle(.plain)
-                    .font(paneMetrics.font(13))
+                    .font(displayMetrics.font(13))
                     .foregroundStyle(inspectorTextColor)
                     .accessibilityLabel(label.replacingOccurrences(of: ":", with: ""))
-                    .padding(.horizontal, paneMetrics.space(10))
-                    .frame(height: paneMetrics.size(30))
+                    .padding(.horizontal, displayMetrics.space(10))
+                    .frame(height: displayMetrics.size(30))
                     .background(
                         RoundedRectangle(cornerRadius: 6)
                             .fill(controlFillColor)
@@ -1635,7 +1635,7 @@ struct ContentView: View {
             }
 
             keywordSearchButton(field: field, text: text.wrappedValue)
-                .padding(.leading, paneMetrics.size(78) + paneMetrics.space(8))
+                .padding(.leading, displayMetrics.size(78) + displayMetrics.space(8))
         }
     }
 
@@ -1657,19 +1657,19 @@ struct ContentView: View {
                     }
                 }
             } label: {
-                HStack(spacing: paneMetrics.space(6)) {
+                HStack(spacing: displayMetrics.space(6)) {
                     Image(systemName: "magnifyingglass")
-                        .font(paneMetrics.font(11, weight: .semibold))
+                        .font(displayMetrics.font(11, weight: .semibold))
                     Text(keyword)
-                        .font(paneMetrics.font(12, weight: .semibold))
+                        .font(displayMetrics.font(12, weight: .semibold))
                         .lineLimit(1)
                     Image(systemName: "chevron.down")
-                        .font(paneMetrics.font(8, weight: .bold))
+                        .font(displayMetrics.font(8, weight: .bold))
                         .foregroundStyle(.white.opacity(0.65))
                 }
                 .foregroundStyle(.white)
-                .padding(.horizontal, paneMetrics.space(10))
-                .frame(maxWidth: .infinity, minHeight: paneMetrics.size(25), alignment: .leading)
+                .padding(.horizontal, displayMetrics.space(10))
+                .frame(maxWidth: .infinity, minHeight: displayMetrics.size(25), alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: 7)
                         .fill(Color.accentColor.opacity(0.45))

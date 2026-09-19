@@ -1,24 +1,25 @@
 //
-//  PaneMetrics.swift
+//  DisplayMetrics.swift
 //  ShelfRow
 //
 
 import SwiftUI
 
-/// Sizes for the side panes, so a narrow display can be given a smaller set
-/// without every view growing its own opinion about what "compact" means.
+/// Sizes for the chrome around the book list — the side panes and the toolbar —
+/// so a narrow display can be given a smaller set without every view growing its
+/// own opinion about what "compact" means.
 ///
 /// Spacing shrinks further than the elements do. At three quarters the type and
 /// icons are still comfortable to read, and what actually costs the height on a
 /// short screen is the air between rows — so that is cut harder.
-struct PaneMetrics: Equatable {
+struct DisplayMetrics: Equatable {
     static let elementScale: CGFloat = 0.75
     static let spacingScale: CGFloat = 0.55
 
     let isCompact: Bool
 
-    static let regular = PaneMetrics(isCompact: false)
-    static let compact = PaneMetrics(isCompact: true)
+    static let regular = DisplayMetrics(isCompact: false)
+    static let compact = DisplayMetrics(isCompact: true)
 
     init(isCompact: Bool) {
         self.isCompact = isCompact

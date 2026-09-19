@@ -782,7 +782,7 @@ struct CustomizeSettingsView: View {
 struct GeneralSettingsView: View {
     @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
     @AppStorage("advancedCloseOnExit") private var closeOnExit = true
-    @AppStorage("compactSidePanes") private var compactSidePanes = false
+    @AppStorage("compactDisplay") private var compactDisplay = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -811,10 +811,10 @@ struct GeneralSettingsView: View {
 
                 PreferencesSettingRow(
                     icon: "arrow.down.right.and.arrow.up.left",
-                    title: "サイドペインを縮小",
-                    description: "左右のペインを75%に縮め、行間はそれ以上に詰めます。画面の狭いMacで本の一覧に幅を回すための表示です。"
+                    title: "表示を縮小",
+                    description: "左右のペインとツールバーを75%に縮め、行間や余白はそれ以上に詰めます。画面の狭いMacで本の一覧に幅と高さを回すための表示です。"
                 ) {
-                    Toggle("縮小表示", isOn: $compactSidePanes)
+                    Toggle("縮小表示", isOn: $compactDisplay)
                         .font(PreferencesLayout.bodyFont)
                         .toggleStyle(.switch)
                 }
