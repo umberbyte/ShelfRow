@@ -741,3 +741,53 @@ cloud モードのまま `modelContext.delete` でローカルのレコードを
 2. 1 台目で iCloud 同期をオンにし、初回アップロードと `eventChangedNotification` の挙動、ホットスワップの安定性（Q3）を確認する。
 3. 2 台目は §9 の「iCloud の蔵書で置き換える」で接続し、ボリュームのアクセス権を再設定する。
 4. Developer ID での Archive・公証を通す（Q4）。リリース前に CloudKit スキーマを Production へデプロイする。
+
+---
+
+## 20. Development → Production 移行で全件が上がらなかった問題（2026-09-19）
+
+### 20.1 症状
+
+1 台目で iCloud 同期をオンにし（当初は Development 環境で 19,287 件のアップロードが完走）、その後 Production 署名のバイナリに切り替えたところ、2 台目が **37 件** しか受け取らずに止まった。1 台目の設定画面は「未送信 0 件 / 送信済み 19,238 件」を表示し、ログにも CloudKit のエラーは一切出なかった。
+
+### 20.2 原因
+
+CloudKit ミラーリングは、レコードごとの「未送信」フラグを非公開テーブル `ANSCKRECORDMETADATA.ZNEEDSUPLOAD` に持つ。**Development で完走したアップロードがこのフラグを全件 0 にし、Production への切り替えでもリセットされなかった。** Production のプライベート DB は空であるのに、ローカルは全件送信済みと認識しているため、送るものが無い。実際に Production へ届いたのは、環境切り替え後に変更があった 37 件（ブックマーク移行で `bookmarkData` を `nil` にした書籍 34 件＋ボリューム 3 件）だけだった。
+
+「iCloudから完全に削除」でゾーンを消して再同期させる回復手順も不十分だった。ゾーン消失を検知した CoreData は `PFCloudKitMetadataPurger` を走らせるが、**これが無効化するのは関連（CDMR）のミラーリング状態であって、レコードごとの `ZNEEDSUPLOAD` ではない。** 結果、関連レコード 19,217 件だけが再アップロードされ、書籍レコードは 1 件も上がらなかった。
+
+2 台目の症状はこれで完全に説明できる。参照先の書籍レコードが存在しない関連レコードを 19,217 件抱え、取り込みが 1 秒 1 回のペースで無限に再試行されていた（`_importFinishedWithResult` が一度も出ない）。
+
+診断に使った数字（2 台目のストアを read-only で直接読んだもの）:
+
+| テーブル | 件数 | 意味 |
+|---|---|---|
+| `ZITEM` / `ZVOLUME` | 34 / 3 | 実際に受け取れた書誌レコード |
+| `ANSCKRECORDMETADATA` | 37 | サーバに存在すると認識しているレコード総数 |
+| `ANSCKMIRROREDRELATIONSHIP` | 19,217 | 受け取った関連レコード |
+| `ANSCKIMPORTPENDINGRELATIONSHIP` | 0 | 保留中の関連は無い |
+
+### 20.3 対処: `CloudResender`
+
+`NSPersistentCloudKitContainer` に再送を命じる公開 API は無い。全オブジェクトに実際の変更を与えてフラグを立て直すのが確実な手段であり、`ShelfRow/CloudResend.swift` の `CloudResender`（`@ModelActor`）としてこれを実装した。環境設定 > iCloud の「iCloudへ全件を再送信」から実行する。
+
+* 200 件ずつ、**一時的な値を入れて保存 → 元の値に戻して保存** の 2 段階で書き換える。iCloud に届くのは現在の蔵書そのままで、変わるのはフラグだけ。
+* 書き換えに使う属性は、読まれても害の無いものを選ぶ（途中でクラッシュした場合に一時的な値が残るため）。`Item.bookmarkData` / `Volume.bookmarkData` はブックマークをローカルストアへ移した時点から誰も読まない死んだ列。`Shelf.sortOrder` と `CoverExtractionRecord.updatedAt` は元に戻る。
+* 送信待ちの件数は既存の「未送信」表示で追える。
+
+### 20.4 併せて修正した不具合: 再起動と重なるストア削除
+
+「iCloudの蔵書で置き換える」の実行時、ログに次が出ていた。
+
+```
+BUG IN CLIENT OF libsqlite3.dylib: database integrity compromised by
+API violation: vnode unlinked while in use: .../default.store
+```
+
+モード変更の再起動は**新しいインスタンスを起動してから古い方を終了させる**ため、新インスタンスの `LibraryStore.init` が走る時点で旧インスタンスがまだストアを開いている。「コンテナが開いていない瞬間に消す」という前提が、自分自身の再起動で崩れていた。`waitForOtherInstancesToExit()`（同一バンドル ID の他プロセスが消えるまで最大 10 秒待つ）を削除の前に挟んで解消した。
+
+### 20.5 教訓
+
+* **Development で同期を検証してから Production に移すことはできない。** レコードごとの送信済みフラグが持ち越され、Production には何も上がらない。移行するなら、Production へ切り替えた直後に全件再送信を実行することが必須。
+* 「未送信 0 件」はサーバ到達の証明ではない。ローカルの記録でしかない。受信側の件数と突き合わせて初めて意味を持つ。
+* ゾーン削除による回復は、関連レコードだけを再送させる中途半端な状態を作る。レコード本体の再送は別途必要。

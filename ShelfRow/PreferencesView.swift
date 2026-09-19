@@ -848,6 +848,7 @@ struct CloudSyncSettingsView: View {
     @State private var isAskingWhichLibraryWins = false
     @State private var isConfirmingDisable = false
     @State private var isConfirmingPurge = false
+    @State private var isConfirmingResend = false
 
     /// The switch says what the user wants; the mode says what the library is
     /// actually doing. They differ whenever iCloud is signed out, which is the
@@ -969,6 +970,35 @@ struct CloudSyncSettingsView: View {
                 }
             }
 
+            if libraryStore.mode == .cloud {
+                PreferencesPanel {
+                    PreferencesSettingRow(
+                        icon: "arrow.up.doc.on.clipboard",
+                        title: "iCloudへ全件を再送信",
+                        description: "この端末の蔵書をすべて送信待ちに入れ直します。「未送信 0件」なのにiCloudや他の端末に蔵書が揃っていないときに使います。蔵書の内容は変わりません。"
+                    ) {
+                        if libraryStore.isResending {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                        } else {
+                            Button("全件を送信待ちに入れる…") {
+                                isConfirmingResend = true
+                            }
+                            .font(PreferencesLayout.bodyFont)
+                            .disabled(!cloudAccount.availability.isAvailable || libraryStore.blockingTask != nil)
+                        }
+                    }
+                }
+
+                if let resendOutcome = libraryStore.resendMessage {
+                    Text(resendOutcome)
+                        .font(PreferencesLayout.smallCaptionFont)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             PreferencesPanel {
                 PreferencesSettingRow(
                     icon: "trash",
@@ -1044,6 +1074,22 @@ struct CloudSyncSettingsView: View {
             Button("キャンセル", role: .cancel) {}
         } message: {
             Text("この端末の蔵書はそのまま残り、iCloudへの送信だけを止めます。iCloud側の蔵書も消えません。反映にはアプリの再起動が必要です。")
+        }
+        .confirmationDialog(
+            "蔵書をすべて送信待ちに入れますか？",
+            isPresented: $isConfirmingResend,
+            titleVisibility: .visible
+        ) {
+            Button("全件を送信待ちに入れる") {
+                Task { await libraryStore.resendEverythingToCloud() }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("""
+                この端末の蔵書をすべてiCloudへの送信待ちに入れ直します。蔵書の内容は変わらず、失われるものもありません。
+                件数が多いと送信には時間がかかります。準備中はアプリの動作が重くなることがあります。
+                他の端末で受け取るには、送信が終わってから「iCloudの蔵書で置き換える」を実行してください。
+                """)
         }
         .confirmationDialog(
             "iCloudのデータをすべて削除しますか？",

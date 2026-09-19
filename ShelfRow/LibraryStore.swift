@@ -3,6 +3,7 @@
 //  ShelfRow
 //
 
+import AppKit
 import Foundation
 import OSLog
 import SwiftData
@@ -61,6 +62,10 @@ final class LibraryStore {
     /// (import, bulk cover generation, restore).
     var blockingTask: String?
 
+    /// While the library is being queued for upload again.
+    private(set) var isResending = false
+    private(set) var resendMessage: String?
+
     /// The user's setting, independent of whether iCloud is reachable right now.
     var syncEnabled: Bool {
         didSet { UserDefaults.standard.set(syncEnabled, forKey: DefaultsKey.syncEnabled) }
@@ -97,6 +102,7 @@ final class LibraryStore {
         // promise. Deleting the rows instead would sync those deletions upward and
         // empty the library everywhere.
         if UserDefaults.standard.bool(forKey: DefaultsKey.pendingLibraryReset) {
+            Self.waitForOtherInstancesToExit()
             StoreFileBackup.removeStoreFiles()
             UserDefaults.standard.set(false, forKey: DefaultsKey.pendingLibraryReset)
             Self.logger.info("Cleared this device's library; it will be refilled from iCloud")
@@ -123,6 +129,32 @@ final class LibraryStore {
         Self.logger.info("Opened the library in \(self.mode.rawValue, privacy: .public) mode")
         BookmarkVault.shared.attach(to: container)
         BookmarkVault.shared.adoptBookmarksStoredOnModels()
+    }
+
+    /// Waits for the instance being replaced to finish quitting.
+    ///
+    /// A mode change is applied by launching a second instance and then quitting
+    /// the first, so the new one reaches this point with the old one still
+    /// holding the store files open. Deleting them there leaves the old process
+    /// writing to files that no longer have a name, which SQLite reports as
+    /// "database integrity compromised by API violation: vnode unlinked while in
+    /// use". Nothing is lost when that happens — the old process is on its way
+    /// out — but the store it is writing to is the one being replaced, and the
+    /// guarantee this code is built on is that no container is open.
+    private static func waitForOtherInstancesToExit(timeout: TimeInterval = 10) {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
+        let ownProcess = ProcessInfo.processInfo.processIdentifier
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            let others = NSRunningApplication
+                .runningApplications(withBundleIdentifier: bundleIdentifier)
+                .filter { $0.processIdentifier != ownProcess && !$0.isTerminated }
+            guard !others.isEmpty else { return }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+
+        logger.error("The previous instance is still running; replacing the library anyway")
     }
 
     /// The mode the app should be in. The setting alone is not enough: without an
@@ -163,6 +195,29 @@ final class LibraryStore {
         syncEnabled = true
         UserDefaults.standard.set(true, forKey: DefaultsKey.pendingLibraryReset)
         persistRequestedMode(.cloud)
+    }
+
+    /// Queues the whole library for upload again. For the case the store's
+    /// bookkeeping says everything has been sent and iCloud disagrees — see
+    /// `CloudResender`.
+    func resendEverythingToCloud() async {
+        guard mode == .cloud, !isResending else { return }
+
+        isResending = true
+        resendMessage = nil
+        blockingTask = "iCloudへの全件再送信"
+        let resender = CloudResender(modelContainer: container)
+
+        do {
+            let queued = try await resender.resendEverything()
+            resendMessage = "\(queued.formatted())件をiCloudへの送信待ちに入れました。送信が終わるまでこのままにしてください。"
+        } catch {
+            Self.logger.error("Could not queue the library for upload: \(error.localizedDescription, privacy: .public)")
+            resendMessage = "再送信の準備に失敗しました: \(error.localizedDescription)"
+        }
+
+        blockingTask = nil
+        isResending = false
     }
 
     func disableSync() {
