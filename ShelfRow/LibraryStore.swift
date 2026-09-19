@@ -44,6 +44,9 @@ final class LibraryStore {
         /// Set when this device is to be re-seeded from iCloud. Acted on at the
         /// next launch, before any store is open.
         static let pendingLibraryReset = "libraryPendingResetFromCloud"
+        /// Set when iCloud's copy is to be deleted. Acted on at the next launch,
+        /// once the library is open without CloudKit attached to it.
+        static let pendingCloudPurge = "libraryPendingCloudPurge"
     }
 
     private(set) var mode: LibraryMode
@@ -165,6 +168,29 @@ final class LibraryStore {
     func disableSync() {
         syncEnabled = false
         persistRequestedMode(.local)
+    }
+
+    /// Turns syncing off and asks for iCloud's copy to be deleted.
+    ///
+    /// The deletion waits for the next launch: with CloudKit still mirroring
+    /// this store, removing the zone only prompts it to upload everything again.
+    /// The caller is expected to restart the app.
+    func requestCloudPurge() {
+        syncEnabled = false
+        UserDefaults.standard.set(true, forKey: DefaultsKey.pendingCloudPurge)
+        persistRequestedMode(.local)
+        Self.logger.info("iCloud's copy will be deleted on the next launch")
+    }
+
+    /// True once, when a purge was asked for and the library is open in a mode
+    /// that makes it safe to carry out.
+    func consumePendingCloudPurge() -> Bool {
+        guard mode == .local,
+              UserDefaults.standard.bool(forKey: DefaultsKey.pendingCloudPurge) else {
+            return false
+        }
+        UserDefaults.standard.set(false, forKey: DefaultsKey.pendingCloudPurge)
+        return true
     }
 
     /// Signing out must not leave the store open through CloudKit, and signing

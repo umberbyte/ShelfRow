@@ -178,5 +178,12 @@ struct ShelfRowApp: App {
             libraryStore.noteAccountAvailability(available)
         }
         cloudAccount.start()
+
+        // Deleting iCloud's copy was asked for last launch and deferred to this
+        // one, where CloudKit is not mirroring the store and so cannot answer a
+        // vanished zone by refilling it.
+        if libraryStore.consumePendingCloudPurge() {
+            Task { await cloudAccount.purgeCloudStorage() }
+        }
     }
 }

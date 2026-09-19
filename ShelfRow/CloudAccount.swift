@@ -69,6 +69,9 @@ final class CloudAccountMonitor {
     /// routinely — the framework waits and carries on by itself, so it is a
     /// state to report, not a failure to warn about.
     private(set) var throttledUntil: Date?
+    /// The result of the last deletion of this app's iCloud data, kept so the
+    /// settings pane can report it after the relaunch that carried it out.
+    private(set) var lastPurgeMessage: String?
 
     var isThrottled: Bool {
         guard let throttledUntil else { return false }
@@ -186,6 +189,42 @@ final class CloudAccountMonitor {
 
         if previous != availability.isAvailable {
             onAvailabilityChange?(availability.isAvailable)
+        }
+    }
+
+    /// Deletes everything this app holds in iCloud, so someone leaving can take
+    /// their storage back.
+    ///
+    /// Every custom zone in the container's private database is removed; the
+    /// container belongs to this app alone, so nothing there is anyone else's.
+    /// This must run with the library open *without* CloudKit — mirroring would
+    /// notice the zone go and upload the whole library again to replace it.
+    func purgeCloudStorage() async {
+        guard CloudKitEntitlement.isPresent else {
+            lastPurgeMessage = CloudKitEntitlement.missingMessage
+            return
+        }
+
+        let database = CKContainer(identifier: LibraryStore.cloudContainerIdentifier).privateCloudDatabase
+        do {
+            let zones = try await database.allRecordZones()
+            // The default zone cannot be deleted and holds nothing of ours.
+            let ours = zones.map(\.zoneID).filter { $0.zoneName != CKRecordZone.ID.defaultZoneName }
+            for zoneID in ours {
+                _ = try await database.deleteRecordZone(withID: zoneID)
+            }
+            Self.logger.info("Deleted \(ours.count, privacy: .public) iCloud zone(s)")
+            lastSyncDate = nil
+            lastSyncErrorMessage = nil
+            throttledUntil = nil
+            syncRoundsCompleted = 0
+            syncStartedAt = nil
+            lastPurgeMessage = ours.isEmpty
+                ? "iCloudにこのアプリのデータはありませんでした。"
+                : "iCloudのデータを削除しました。使用していた容量は解放されます。"
+        } catch {
+            Self.logger.error("Could not delete this app's iCloud data: \(error.localizedDescription, privacy: .public)")
+            lastPurgeMessage = "iCloudのデータを削除できませんでした: \(error.localizedDescription)"
         }
     }
 

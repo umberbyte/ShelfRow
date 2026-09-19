@@ -835,6 +835,7 @@ struct CloudSyncSettingsView: View {
     @State private var isAskingWhichLibraryWins = false
     @State private var isConfirmingDisable = false
     @State private var seedProgress: CloudSeedProgress?
+    @State private var isConfirmingPurge = false
 
     /// The switch says what the user wants; the mode says what the library is
     /// actually doing. They differ whenever iCloud is signed out, which is the
@@ -970,6 +971,27 @@ struct CloudSyncSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            PreferencesPanel {
+                PreferencesSettingRow(
+                    icon: "trash",
+                    title: "iCloudのデータを削除",
+                    description: "このアプリがiCloudに保存している書誌情報をすべて消し、使用しているiCloudの容量を解放します。この端末の蔵書・サムネイル・設定は残ります。"
+                ) {
+                    Button("iCloudから完全に削除…", role: .destructive) {
+                        isConfirmingPurge = true
+                    }
+                    .font(PreferencesLayout.bodyFont)
+                    .disabled(!cloudAccount.availability.isAvailable || libraryStore.blockingTask != nil)
+                }
+            }
+
+            if let purgeOutcome = cloudAccount.lastPurgeMessage {
+                Text(purgeOutcome)
+                    .font(PreferencesLayout.smallCaptionFont)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if libraryStore.restartRequired {
                 HStack(spacing: 8) {
                     Label("再起動すると新しい設定で開きます。", systemImage: "arrow.clockwise")
@@ -1024,6 +1046,24 @@ struct CloudSyncSettingsView: View {
             Button("キャンセル", role: .cancel) {}
         } message: {
             Text("この端末の蔵書はそのまま残り、iCloudへの送信だけを止めます。iCloud側の蔵書も消えません。反映にはアプリの再起動が必要です。")
+        }
+        .confirmationDialog(
+            "iCloudのデータをすべて削除しますか？",
+            isPresented: $isConfirmingPurge,
+            titleVisibility: .visible
+        ) {
+            Button("削除して再起動", role: .destructive) {
+                libraryStore.requestCloudPurge()
+                relaunch()
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("""
+                iCloudに保存されているこのアプリの書誌情報をすべて削除し、使用中のiCloud容量を解放します。削除は取り消せません。
+                この端末の蔵書・サムネイル・設定は残ります。iCloud同期はオフになります。
+                他の端末で同期をオンにしたままだと、その端末が同じ内容を再びアップロードします。先にすべての端末で同期をオフにしてください。
+                削除はアプリの再起動後に実行されます。
+                """)
         }
     }
 
