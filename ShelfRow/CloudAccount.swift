@@ -78,26 +78,16 @@ final class CloudAccountMonitor {
         return throttledUntil > Date()
     }
 
-    /// Completed export/import rounds since the app launched. CloudKit does not
-    /// publish how many records a round carried, nor how many are left, so this
-    /// counts activity rather than progress — enough to show that seeding is
-    /// moving, not enough to put a percentage on it.
-    private(set) var syncRoundsCompleted = 0
-    private(set) var syncStartedAt: Date?
+    /// Whether iCloud is still working through changes.
+    ///
+    /// CloudKit reports that a round finished and nothing about what is left, so
+    /// there is no count to show and no bar to fill — only whether rounds are
+    /// still arriving. They come every few seconds during a large upload, so a
+    /// long enough gap means it has settled.
+    private(set) var isSyncing = false
 
-    /// Rounds arrive every few seconds while a large library is being seeded, so
-    /// a gap this long means it has settled.
     private static let settledAfter: TimeInterval = 90
-
-    var isSyncing: Bool {
-        if isThrottled { return true }
-        guard let lastSyncDate else { return false }
-        return Date().timeIntervalSince(lastSyncDate) < Self.settledAfter
-    }
-
-    var syncElapsed: TimeInterval? {
-        syncStartedAt.map { Date().timeIntervalSince($0) }
-    }
+    private var settleTask: Task<Void, Never>?
 
     /// Held for the lifetime of the app — the monitor is created once by the
     /// `App` and never torn down, so there is no point at which to unregister.
@@ -217,8 +207,8 @@ final class CloudAccountMonitor {
             lastSyncDate = nil
             lastSyncErrorMessage = nil
             throttledUntil = nil
-            syncRoundsCompleted = 0
-            syncStartedAt = nil
+            isSyncing = false
+            settleTask?.cancel()
             lastPurgeMessage = ours.isEmpty
                 ? "iCloudにこのアプリのデータはありませんでした。"
                 : "iCloudのデータを削除しました。使用していた容量は解放されます。"
@@ -259,12 +249,8 @@ final class CloudAccountMonitor {
     }
 
     private func recordSyncEvent(succeeded: Bool, errorMessage: String?, retryAfter: TimeInterval?) {
-        if syncStartedAt == nil || !isSyncing {
-            syncStartedAt = Date()
-            syncRoundsCompleted = 0
-        }
-        syncRoundsCompleted += 1
         lastSyncDate = Date()
+        markSyncing()
 
         guard !succeeded else {
             lastSyncErrorMessage = nil
@@ -283,6 +269,18 @@ final class CloudAccountMonitor {
         lastSyncErrorMessage = errorMessage
         if let errorMessage {
             Self.logger.error("CloudKit sync event failed: \(errorMessage, privacy: .public)")
+        }
+    }
+
+    /// Holds `isSyncing` true until rounds stop arriving. Rescheduling on every
+    /// event measures the quiet gap from the last one rather than the first.
+    private func markSyncing() {
+        isSyncing = true
+        settleTask?.cancel()
+        settleTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.settledAfter))
+            guard !Task.isCancelled else { return }
+            self?.isSyncing = false
         }
     }
 }

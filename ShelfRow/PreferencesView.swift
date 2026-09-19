@@ -834,7 +834,6 @@ struct CloudSyncSettingsView: View {
     /// copy survives: this device's, or the one iCloud already holds.
     @State private var isAskingWhichLibraryWins = false
     @State private var isConfirmingDisable = false
-    @State private var seedProgress: CloudSeedProgress?
     @State private var isConfirmingPurge = false
 
     /// The switch says what the user wants; the mode says what the library is
@@ -934,41 +933,27 @@ struct CloudSyncSettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
-                if libraryStore.mode == .cloud, cloudAccount.isSyncing || seedProgress?.isComplete == false {
+                if libraryStore.mode == .cloud {
                     PreferencesDivider()
 
                     PreferencesSettingRow(
                         icon: "arrow.triangle.2.circlepath",
                         title: "同期の進行",
-                        description: progressDescription
+                        description: "iCloudとの送受信の状態です。"
                     ) {
-                        if let seedProgress {
-                            VStack(alignment: .trailing, spacing: 4) {
-                                ProgressView(value: seedProgress.fraction)
-                                    .progressViewStyle(.linear)
-                                    .frame(width: 160)
-                                Text(seedProgress.fraction.formatted(.percent.precision(.fractionLength(1))))
-                                    .font(PreferencesLayout.smallCaptionFont)
-                                    .foregroundColor(.secondary)
-                                    .monospacedDigit()
-                            }
-                        } else {
-                            // CloudKit publishes no counts of its own; without the
-                            // store's own bookkeeping there is no honest bar.
+                        if cloudAccount.isSyncing {
+                            // CloudKit says a round finished and never how many
+                            // are left, so there is nothing to fill a bar with.
                             ProgressView()
                                 .progressViewStyle(.circular)
                                 .controlSize(.small)
+                        } else {
+                            Text("送受信完了")
+                                .font(PreferencesLayout.bodyFont)
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
-            }
-
-            if let message = libraryStore.lastFailureMessage ?? cloudAccount.lastSyncErrorMessage,
-               !cloudAccount.isThrottled {
-                Label(message, systemImage: "exclamationmark.triangle")
-                    .font(PreferencesLayout.smallCaptionFont)
-                    .foregroundColor(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             PreferencesPanel {
@@ -1011,7 +996,6 @@ struct CloudSyncSettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task { await cloudAccount.refresh() }
-        .task(id: libraryStore.mode) { await pollSeedProgress() }
         .confirmationDialog(
             "どちらの蔵書を残しますか？",
             isPresented: $isAskingWhichLibraryWins,
@@ -1067,19 +1051,6 @@ struct CloudSyncSettingsView: View {
         }
     }
 
-    /// Counting is a read of the store on disk, so it only runs while someone is
-    /// looking at this pane.
-    private func pollSeedProgress() async {
-        guard libraryStore.mode == .cloud else {
-            seedProgress = nil
-            return
-        }
-        while !Task.isCancelled {
-            seedProgress = CloudSeedProgressReader.read(container: libraryStore.container)
-            try? await Task.sleep(for: .seconds(3))
-        }
-    }
-
     /// Every mode change takes effect at the next launch: the store cannot be
     /// swapped under a running app without handing views models whose context
     /// has been torn down.
@@ -1091,25 +1062,6 @@ struct CloudSyncSettingsView: View {
         }
     }
 
-    private var progressDescription: String {
-        var parts: [String] = []
-        if let seedProgress {
-            parts.append("\(seedProgress.mirrored.formatted()) / \(seedProgress.total.formatted()) 件")
-        }
-        parts.append("\(cloudAccount.syncRoundsCompleted)回の送受信が完了")
-        if let elapsed = cloudAccount.syncElapsed, elapsed >= 60 {
-            parts.append("経過 \(Int(elapsed / 60))分")
-        }
-        if cloudAccount.isThrottled, let until = cloudAccount.throttledUntil {
-            let seconds = max(0, Int(until.timeIntervalSinceNow.rounded()))
-            parts.append("iCloud側の制限により約\(seconds)秒待機中")
-        }
-        if seedProgress == nil {
-            parts.append("残り件数はiCloudが公開していないため表示できません")
-        }
-        return parts.joined(separator: " / ")
-    }
-
     private var lastSyncDescription: String {
         if let task = libraryStore.blockingTask {
             return "「\(task)」の実行中は切り替えできません。"
@@ -1117,10 +1069,7 @@ struct CloudSyncSettingsView: View {
         guard let date = cloudAccount.lastSyncDate else {
             return "まだ同期していません。"
         }
-        let synced = "最終同期: \(date.formatted(date: .abbreviated, time: .shortened))"
-        guard cloudAccount.isThrottled else { return synced }
-        // Seeding a large library earns this routinely; CloudKit resumes by itself.
-        return synced + " — iCloud側の制限により一時待機中です。自動的に再開します。"
+        return "最終同期: \(date.formatted(date: .abbreviated, time: .shortened))"
     }
 }
 
