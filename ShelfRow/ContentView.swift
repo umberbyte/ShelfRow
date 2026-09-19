@@ -468,7 +468,7 @@ struct ContentView: View {
             // it, which is the point: not being able to reach the share is the
             // normal state of a laptop, not a fault to report.
             try? await Task.sleep(for: .seconds(5))
-            await thumbnailDistribution.considerAutomaticWork(isPrimary: !libraryStore.isReplica)
+            await thumbnailDistribution.considerAutomaticWork()
         }
         .onAppear {
             // Apply security lock if enabled

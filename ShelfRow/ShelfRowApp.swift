@@ -189,6 +189,6 @@ struct ShelfRowApp: App {
             Task { await cloudAccount.purgeCloudStorage() }
         }
 
-        thumbnailDistribution.attach(to: libraryStore.container)
+        thumbnailDistribution.attach(to: libraryStore.container, mode: libraryStore.mode)
     }
 }

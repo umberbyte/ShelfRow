@@ -78,6 +78,12 @@ final class ThumbnailDistributionCoordinator {
     /// because it rewrites every record and iCloud carries all of it.
     private static let quietUploadCount = 500
 
+    /// The mode the library is open in. Distribution only has a job while the
+    /// library is shared: `coverVersion`, which decides who fetches what, only
+    /// reaches the other devices through iCloud. With syncing off, this device is
+    /// alone with its covers and the folder is nobody's business.
+    private(set) var libraryMode: LibraryMode = .local
+
     private(set) var status: RootStatus = .notChosen
     private(set) var counts: CoverDistributionCounts?
     private(set) var activity: Activity?
@@ -92,6 +98,17 @@ final class ThumbnailDistributionCoordinator {
     private var runTask: Task<Void, Never>?
 
     var isRunning: Bool { activity != nil }
+
+    /// Whether files may move between this device and the folder at all.
+    var isActive: Bool { libraryMode == .cloud && status.isReady }
+
+    /// Why nothing will happen, when nothing will.
+    var inactiveReason: String? {
+        if libraryMode != .cloud {
+            return "iCloud同期がオフのため、サムネイルの配布は行いません。"
+        }
+        return status.isReady ? nil : status.message
+    }
 
     var autoFetchEnabled: Bool {
         didSet { UserDefaults.standard.set(autoFetchEnabled, forKey: DefaultsKey.autoFetch) }
@@ -114,9 +131,10 @@ final class ThumbnailDistributionCoordinator {
 
     /// Called once the library store is open, and again after it is reopened in a
     /// different mode.
-    func attach(to container: ModelContainer) {
+    func attach(to container: ModelContainer, mode: LibraryMode) {
         let store = CoverDistributionStore(modelContainer: container)
         self.store = store
+        libraryMode = mode
         resolveRoot()
         Task {
             await store.adoptLocalFiles()
@@ -160,13 +178,13 @@ final class ThumbnailDistributionCoordinator {
         switch ThumbnailDistribution.validate(root: url) {
         case .success(let marker):
             status = .ready(marker.libraryID)
-            ThumbnailDistribution.currentRoot = url
+            publishRootForCoverGeneration(url)
             lastMessage = nil
         case .failure(.notADistributionFolder) where initialiseIfNeeded:
             do {
                 let marker = try ThumbnailDistribution.initialiseRoot(at: url)
                 status = .ready(marker.libraryID)
-                ThumbnailDistribution.currentRoot = url
+                publishRootForCoverGeneration(url)
                 lastMessage = "配布元フォルダを初期化しました。"
             } catch {
                 status = .problem(.unreadableMarker(error.localizedDescription))
@@ -213,7 +231,7 @@ final class ThumbnailDistributionCoordinator {
         switch ThumbnailDistribution.validate(root: url) {
         case .success(let marker):
             status = .ready(marker.libraryID)
-            ThumbnailDistribution.currentRoot = url
+            publishRootForCoverGeneration(url)
             if isStale, let refreshed = try? url.bookmarkData(
                 options: .withSecurityScope,
                 includingResourceValuesForKeys: nil,
@@ -224,6 +242,13 @@ final class ThumbnailDistributionCoordinator {
         case .failure(let problem):
             status = .problem(problem)
         }
+    }
+
+    /// Lets cover generation read from the folder before it opens an archive —
+    /// but only while the library is shared. With syncing off there is no other
+    /// device to have put anything there for this one.
+    private func publishRootForCoverGeneration(_ url: URL) {
+        ThumbnailDistribution.currentRoot = libraryMode == .cloud ? url : nil
     }
 
     private func releaseRoot() {
@@ -315,11 +340,16 @@ final class ThumbnailDistributionCoordinator {
     /// becomes reachable. Being unable to reach the folder is not an error worth
     /// reporting — a laptop away from the NAS is in that state most of the day —
     /// so this simply does nothing until it can.
-    func considerAutomaticWork(isPrimary: Bool) async {
-        guard status.isReady, !isRunning, autoFetchEnabled, pendingOffer == nil, let store else { return }
+    func considerAutomaticWork() async {
+        guard isActive, !isRunning, autoFetchEnabled, pendingOffer == nil, let store else { return }
 
-        if isPrimary,
-           let uploads = try? await store.uploadTargets(),
+        // Handing over a cover this device made is not the first device's
+        // privilege — any Mac may generate the one book being looked at, and the
+        // others should get it. What stays with the first device is the
+        // library-sized registration, which has its own button: a run of that
+        // size here would mean two Macs had generated the same twenty thousand
+        // covers, which the rules above are there to prevent.
+        if let uploads = try? await store.uploadTargets(),
            !uploads.isEmpty,
            uploads.count <= Self.quietUploadCount {
             uploadEverything()
@@ -366,7 +396,7 @@ final class ThumbnailDistributionCoordinator {
         _ kind: Activity.Kind,
         _ work: @escaping (CoverDistributionStore, URL, @escaping @Sendable (Int, Int) -> Void) async -> String
     ) {
-        guard let store, let root, status.isReady, runTask == nil else { return }
+        guard let store, let root, isActive, runTask == nil else { return }
 
         activity = Activity(kind: kind, done: 0, total: 0)
         lastMessage = nil

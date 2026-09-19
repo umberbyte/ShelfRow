@@ -706,4 +706,18 @@ struct ThumbnailDistributionTests {
         #expect(try context.fetchCount(FetchDescriptor<Item>()) == 1)
         #expect(try context.fetchCount(FetchDescriptor<LocalCoverState>()) == 1)
     }
+
+    @MainActor
+    @Test func distributionStaysOutOfItWhileTheLibraryIsNotShared() {
+        // What decides who fetches what is coverVersion, and that only reaches
+        // the other devices through iCloud. With syncing off there is no other
+        // device in the picture, so neither direction has a job to do.
+        let coordinator = ThumbnailDistributionCoordinator()
+
+        #expect(!coordinator.isActive)
+        #expect(coordinator.inactiveReason != nil)
+        // Cover generation asks this before it opens an archive; nothing should
+        // have pointed it at a folder.
+        #expect(ThumbnailDistribution.currentRoot == nil)
+    }
 }

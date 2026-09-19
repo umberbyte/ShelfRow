@@ -1312,15 +1312,16 @@ struct MaintenanceSettingsView: View {
                         set: { thumbnails.autoFetchEnabled = $0 }
                     ))
                     .font(PreferencesLayout.bodyFont)
+                    .disabled(thumbnails.libraryMode != .cloud)
                 }
 
                 HStack(spacing: 10) {
                     HStack(spacing: 6) {
                         Image(systemName: "folder")
                             .foregroundStyle(.secondary)
-                        Text(thumbnails.status.message)
+                        Text(thumbnails.inactiveReason ?? thumbnails.status.message)
                             .font(PreferencesLayout.bodyFont)
-                            .foregroundStyle(thumbnails.status.isReady ? .primary : .secondary)
+                            .foregroundStyle(thumbnails.isActive ? .primary : .secondary)
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
@@ -1332,7 +1333,7 @@ struct MaintenanceSettingsView: View {
 
                     Button("選択...") { selectThumbnailRoot() }
                         .controlSize(.large)
-                        .disabled(thumbnails.isRunning)
+                        .disabled(thumbnails.isRunning || thumbnails.libraryMode != .cloud)
 
                     if thumbnails.status != .notChosen {
                         Button("解除") { thumbnails.forgetRoot() }
@@ -1367,7 +1368,7 @@ struct MaintenanceSettingsView: View {
                     HStack(alignment: .top, spacing: ThumbnailPanelLayout.columnGap) {
                         Button("配布元からサムネイルを取得") { thumbnails.fetchEverything() }
                             .controlSize(.large)
-                            .disabled(!thumbnails.status.isReady)
+                            .disabled(!thumbnails.isActive)
                             .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
 
                         Text("この端末に無いサムネイルを配布元から取り込みます。中断しても、次回は残りだけが対象になります。")
@@ -1387,7 +1388,7 @@ struct MaintenanceSettingsView: View {
                         HStack(alignment: .top, spacing: ThumbnailPanelLayout.columnGap) {
                             Button("サムネイルを配布元へ登録") { thumbnails.uploadEverything() }
                                 .controlSize(.large)
-                                .disabled(!thumbnails.status.isReady)
+                                .disabled(!thumbnails.isActive)
                                 .frame(width: ThumbnailPanelLayout.controlColumn, alignment: .leading)
 
                             Text("この端末が持っているサムネイルを配布元へコピーし、他の端末が取得できるようにします。書誌情報の更新を伴うため、iCloudへの再送信が発生します。")
