@@ -27,7 +27,8 @@ enum LibraryStoreError: LocalizedError {
     }
 }
 
-/// Decides which mode to open in, opens it, and reopens when the answer changes.
+/// Decides which mode to open the library in, and records when that answer
+/// has changed so the next launch can act on it.
 @Observable
 @MainActor
 final class LibraryStore {
@@ -47,13 +48,14 @@ final class LibraryStore {
 
     private(set) var mode: LibraryMode
     private(set) var container: ModelContainer
-    /// Bumped on every reopen. The root view keys off it, so the whole tree —
-    /// and every `@Query` holding the old context — is rebuilt.
-    private(set) var generation = 0
     private(set) var lastFailureMessage: String?
 
-    /// A long-running job that must finish before the store can be reopened
-    /// underneath it (import, bulk cover generation, restore).
+    /// Set once the open mode no longer matches what the setting and the account
+    /// call for. Applying it takes a relaunch — see `persistRequestedMode`.
+    private(set) var restartRequired = false
+
+    /// A long-running job that must finish before the mode is changed under it
+    /// (import, bulk cover generation, restore).
     var blockingTask: String?
 
     /// The user's setting, independent of whether iCloud is reachable right now.
@@ -103,79 +105,54 @@ final class LibraryStore {
         syncEnabled && accountAvailable ? .cloud : .local
     }
 
-    /// True when the store is open in a mode that no longer matches the setting
-    /// and the account, and nothing long-running is in the way.
-    func needsReopen(accountAvailable: Bool) -> Bool {
-        blockingTask == nil
-            && Self.effectiveMode(syncEnabled: syncEnabled, accountAvailable: accountAvailable) != mode
+    /// Records what the next launch should open, and asks for a relaunch.
+    ///
+    /// Swapping the container while the app runs was tried and abandoned: SwiftUI
+    /// keeps handing views and in-flight tasks the `Item`s belonging to the
+    /// context that is being torn down, and reading any of them afterwards traps
+    /// inside SwiftData ("this model instance was destroyed"). Choosing the mode
+    /// before the first container exists is the only point where nothing holds a
+    /// model at all.
+    private func persistRequestedMode(_ target: LibraryMode) {
+        UserDefaults.standard.set(target.rawValue, forKey: DefaultsKey.lastMode)
+        restartRequired = target != mode
+        Self.logger.info("Next launch will open the library in \(target.rawValue, privacy: .public) mode")
     }
 
     /// Turns syncing on with this device's library as the one that fills iCloud.
     /// Right for the first device; on any later one it would upload a second copy
     /// of books iCloud already holds, since nothing merges them.
-    func enableSyncSeedingCloud(accountAvailable: Bool) {
+    func enableSyncSeedingCloud() {
+        StoreFileBackup.snapshotBeforeModeSwitch()
         syncEnabled = true
-        reconcile(accountAvailable: accountAvailable)
+        persistRequestedMode(.cloud)
     }
 
     /// Turns syncing on by throwing this device's library away and taking
-    /// iCloud's. Right for every device after the first.
-    ///
-    /// The work itself is left to the next launch (see `init`), so the caller is
-    /// expected to restart the app.
+    /// iCloud's. Right for every device after the first. The deletion itself
+    /// happens at the next launch (see `init`).
     func enableSyncReplacingLocalLibrary() {
         StoreFileBackup.snapshotBeforeModeSwitch()
         syncEnabled = true
         UserDefaults.standard.set(true, forKey: DefaultsKey.pendingLibraryReset)
-        UserDefaults.standard.set(LibraryMode.cloud.rawValue, forKey: DefaultsKey.lastMode)
-        Self.logger.info("This device will be refilled from iCloud on the next launch")
+        persistRequestedMode(.cloud)
     }
 
-    /// Reopens the store in whichever mode the setting and account now call for.
-    @discardableResult
-    func reconcile(accountAvailable: Bool) -> Bool {
+    func disableSync() {
+        syncEnabled = false
+        persistRequestedMode(.local)
+    }
+
+    /// Signing out must not leave the store open through CloudKit, and signing
+    /// back in should resume. Neither is urgent enough to restart the app out
+    /// from under the user, so it is recorded and surfaced instead.
+    func noteAccountAvailability(_ accountAvailable: Bool) {
         let target = Self.effectiveMode(syncEnabled: syncEnabled, accountAvailable: accountAvailable)
-        guard target != mode else { return false }
-        guard blockingTask == nil else {
-            Self.logger.info("Deferring the switch to \(target.rawValue, privacy: .public): \(self.blockingTask ?? "", privacy: .public) is running")
-            return false
+        guard target != mode else {
+            restartRequired = false
+            return
         }
-        return reopen(in: target)
-    }
-
-    @discardableResult
-    private func reopen(in target: LibraryMode) -> Bool {
-        // A crash or a mid-switch account change is the one moment CloudKit could
-        // decide the local copy belongs to someone else, so keep a copy first.
-        if target == .cloud {
-            StoreFileBackup.snapshotBeforeModeSwitch()
-        }
-
-        do {
-            try container.mainContext.save()
-        } catch {
-            Self.logger.error("Could not save before switching modes: \(error.localizedDescription, privacy: .public)")
-        }
-
-        do {
-            let reopened = try Self.makeContainer(mode: target)
-            container = reopened
-            mode = target
-            generation += 1
-            lastFailureMessage = nil
-            UserDefaults.standard.set(target.rawValue, forKey: DefaultsKey.lastMode)
-            BookmarkVault.shared.attach(to: reopened)
-            Self.logger.info("Reopened the library in \(target.rawValue, privacy: .public) mode")
-            return true
-        } catch {
-            // The old container is untouched, so staying on it is safe.
-            Self.logger.error("Could not reopen in \(target.rawValue, privacy: .public) mode: \(error.localizedDescription, privacy: .public)")
-            lastFailureMessage = "モードを切り替えられませんでした: \(error.localizedDescription)"
-            if target == .cloud {
-                syncEnabled = false
-            }
-            return false
-        }
+        persistRequestedMode(target)
     }
 
     private static func makeContainer(mode: LibraryMode) throws -> ModelContainer {

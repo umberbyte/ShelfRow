@@ -153,9 +153,6 @@ struct ShelfRowApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                // Reopening the store in a different mode replaces every context
-                // the tree is holding, so the tree is rebuilt with it.
-                .id(libraryStore.generation)
                 .preferredColorScheme(appearanceMode.colorScheme)
                 .environment(libraryStore)
                 .environment(cloudAccount)
@@ -178,7 +175,7 @@ struct ShelfRowApp: App {
 
     private func watchAccount() {
         cloudAccount.onAvailabilityChange = { available in
-            libraryStore.reconcile(accountAvailable: available)
+            libraryStore.noteAccountAvailability(available)
         }
         cloudAccount.start()
     }
