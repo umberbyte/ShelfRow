@@ -41,6 +41,13 @@
   * カスタムコンポーネントには `.accessibilityLabel`、`.accessibilityValue`、`.accessibilityHint` を付与する。
   * 文字列やレイアウトは Dynamic Type に対応し、固定サイズ指定による文字欠けを防ぐ。
 
+## 5. macOSリリースと配布
+* **Apple公証の必須化**:
+  * リリース用バイナリはDeveloper IDで署名するだけで配布せず、必ずApple Notary Serviceへ提出して公証を完了する。
+  * 公証結果がAcceptedであることを確認し、公証チケットをアプリへstapleしてから配布用ZIPを作成する。
+  * ZIPを展開したアプリに対して `xcrun stapler validate`、`spctl --assess --type execute`、`codesign --verify --deep --strict` を実行し、すべて成功した場合のみ公開する。
+  * SHA-256チェックサムは、公証チケットを含む最終版ZIPから生成する。GitHub Releaseなどの添付ファイルも、この最終版ZIPとチェックサムを使用する。
+
 ---
 
 ### 実装判断マトリクス
