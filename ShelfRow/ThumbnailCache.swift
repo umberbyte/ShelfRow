@@ -11,7 +11,7 @@ import ImageIO
 import OSLog
 import QuickLookThumbnailing
 
-private let thumbnailLogger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "Thumbnails")
+nonisolated private let thumbnailLogger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "Thumbnails")
 
 @globalActor
 actor ThumbnailCacheActor {
@@ -61,7 +61,7 @@ enum CoverPrefetchWindow {
 /// `NSCache` is already thread-safe, so the memory tier lives outside the actor:
 /// the UI can check it synchronously and draw an image it has decoded before in
 /// the same frame, instead of showing a placeholder for one actor hop.
-private final class ThumbnailMemoryStore: @unchecked Sendable {
+nonisolated private final class ThumbnailMemoryStore: @unchecked Sendable {
     private let cache = NSCache<NSString, NSImage>()
 
     init(countLimit: Int, totalCostLimit: Int) {
@@ -81,6 +81,10 @@ private final class ThumbnailMemoryStore: @unchecked Sendable {
         cache.removeAllObjects()
     }
 
+    func remove(forKey key: String) {
+        cache.removeObject(forKey: key as NSString)
+    }
+
     /// Covers vary in size, so the byte budget is what actually bounds RAM; the
     /// count limit is only a backstop.
     private static func decodedByteCount(of image: NSImage) -> Int {
@@ -92,27 +96,36 @@ private final class ThumbnailMemoryStore: @unchecked Sendable {
 /// Sized for browsing a large library: enough covers to keep the rows around a
 /// long scroll resident, bounded by a byte budget rather than a count so the
 /// ceiling holds whatever their dimensions are.
-private let thumbnailMemoryStore = ThumbnailMemoryStore(
+nonisolated private let thumbnailMemoryStore = ThumbnailMemoryStore(
     countLimit: 1500,
     totalCostLimit: 320 * 1024 * 1024
 )
 
 /// Resolved once: the disk tier runs outside the actor and would otherwise
 /// re-create the directory on every read.
-private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
+nonisolated private let thumbnailCacheDirectory: URL = ThumbnailCache.diskCacheDirectory
 
-/// Reading an already-rendered thumbnail gets its own lane: serial, so a full
-/// grid of cells cannot spawn a thread each, and separate from the queue doing
-/// archive extraction, so a cheap read never waits behind an expensive one.
-private let thumbnailReadQueue = DispatchQueue(
+/// Reading an already-rendered thumbnail gets its own lane. A small number of
+/// prefetch reads may run together, while the foreground cover can start without
+/// waiting behind all of them.
+nonisolated private let thumbnailReadQueue = DispatchQueue(
     label: "\(ThumbnailCache.appIdentifier).thumbnail-read",
-    qos: .userInitiated
+    qos: .userInitiated,
+    attributes: .concurrent
+)
+
+/// Archive and NAS reads are blocking. Keeping them off Swift's cooperative
+/// executor prevents a slow share from taking away a worker needed by UI tasks.
+nonisolated private let thumbnailExtractionQueue = DispatchQueue(
+    label: "\(ThumbnailCache.appIdentifier).thumbnail-extraction",
+    qos: .utility,
+    attributes: .concurrent
 )
 
 /// Lets work already queued on a GCD lane notice that whoever asked for it has
 /// gone away. Dispatch work items cannot be cancelled once enqueued, so the
 /// block checks this instead.
-private final class CancellationFlag: @unchecked Sendable {
+nonisolated private final class CancellationFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
 
@@ -147,7 +160,7 @@ final class ThumbnailCache {
 
     /// Shared thumbnails disk-cache location (also used by the importer and
     /// the legacy thumbnail migration).
-    nonisolated static var diskCacheDirectory: URL {
+    nonisolated static let diskCacheDirectory: URL = {
         let appCache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(appIdentifier, isDirectory: true)
         let thumbs = appCache.appendingPathComponent("Thumbnails", isDirectory: true)
@@ -156,7 +169,7 @@ final class ThumbnailCache {
 
         try? FileManager.default.createDirectory(at: thumbs, withIntermediateDirectories: true, attributes: nil)
         return thumbs
-    }
+    }()
 
     /// One-time move from the "jp.aromatics.ShelfRow" Caches folder builds before
     /// this fix used, so existing thumbnails carry forward instead of silently
@@ -222,6 +235,7 @@ final class ThumbnailCache {
     /// cursor as long as it is not serialized behind heavier work.
     nonisolated static func renderedThumbnail(for request: ThumbnailRequest) -> NSImage? {
         let cacheKeyString = request.itemID.uuidString
+        if let cached = thumbnailMemoryStore.image(forKey: cacheKeyString) { return cached }
         let fileManager = FileManager.default
         let localThumbnailURL = thumbnailCacheDirectory.appendingPathComponent("\(cacheKeyString).jpg")
 
@@ -340,6 +354,18 @@ final class ThumbnailCache {
         return (thumbnail, true)
     }
 
+    /// Bridges blocking archive/NAS work onto the dedicated I/O queue while the
+    /// caller remains in structured concurrency.
+    nonisolated private static func extractThumbnailInBackground(
+        for request: ThumbnailRequest
+    ) async -> (image: NSImage?, fileWasReachable: Bool) {
+        await withCheckedContinuation { continuation in
+            thumbnailExtractionQueue.async {
+                continuation.resume(returning: extractThumbnailToDiskCache(for: request))
+            }
+        }
+    }
+
     /// Copies one cover out of the NAS distribution folder, if it holds it.
     ///
     /// Answers nil for every reason — no folder chosen, share not mounted, that
@@ -379,7 +405,7 @@ final class ThumbnailCache {
             var next = 0
             while next < min(width, requests.count) {
                 group.addTask(priority: .utility) { [request = requests[next]] in
-                    let outcome = ThumbnailCache.extractThumbnailToDiskCache(for: request)
+                    let outcome = await ThumbnailCache.extractThumbnailInBackground(for: request)
                     return (request.itemID, outcome.image != nil, outcome.fileWasReachable)
                 }
                 next += 1
@@ -402,7 +428,7 @@ final class ThumbnailCache {
 
                 guard !Task.isCancelled, next < requests.count else { continue }
                 group.addTask(priority: .utility) { [request = requests[next]] in
-                    let outcome = ThumbnailCache.extractThumbnailToDiskCache(for: request)
+                    let outcome = await ThumbnailCache.extractThumbnailInBackground(for: request)
                     return (request.itemID, outcome.image != nil, outcome.fileWasReachable)
                 }
                 next += 1
@@ -442,11 +468,14 @@ final class ThumbnailCache {
         ]
         let imageOptions: [CFString: Any] = [
             kCGImageSourceShouldCache: true,
-            kCGImageSourceShouldCacheImmediately: true
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 768
         ]
 
         guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, imageOptions as CFDictionary) else {
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, imageOptions as CFDictionary) else {
             return nil
         }
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
@@ -491,7 +520,7 @@ final class ThumbnailCache {
             return
         }
 
-        prefetchTask = Task { [weak self] in
+        prefetchTask = Task {
             // Leave the volume to the cover actually on screen, which starts
             // loading first. The caller has already waited for the cursor to
             // settle, so this only orders the two.
@@ -502,7 +531,7 @@ final class ThumbnailCache {
                 var next = 0
                 while next < min(Self.maxConcurrentPrefetches, pending.count) {
                     let request = pending[next]
-                    group.addTask { _ = await self?.getCoverImage(for: request) }
+                    group.addTask { _ = await Self.renderedCoverImage(for: request) }
                     next += 1
                 }
 
@@ -511,7 +540,7 @@ final class ThumbnailCache {
                 while await group.next() != nil {
                     guard !Task.isCancelled, next < pending.count else { continue }
                     let request = pending[next]
-                    group.addTask { _ = await self?.getCoverImage(for: request) }
+                    group.addTask { _ = await Self.renderedCoverImage(for: request) }
                     next += 1
                 }
             }
@@ -531,17 +560,17 @@ final class ThumbnailCache {
 
         // 3. Source Extraction
         // Bookmark resolution, the read over the volume, and the decode/re-encode
-        // all run on DispatchQueue.global. Keeping the CPU work off the actor
+        // all run on a dedicated blocking-I/O lane. Keeping the CPU work off the actor
         // matters as much as keeping the I/O off it: on the actor, a prefetched
         // cover being decoded would stall the disk read for the cover on screen.
-        let thumbnail: NSImage? = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.extractThumbnailToDiskCache(for: request).image)
-            }
-        }
+        let outcome = await Self.extractThumbnailInBackground(for: request)
 
-        guard let thumbnail else {
-            missingCoverKeys.insert(cacheKeyString)
+        guard let thumbnail = outcome.image else {
+            // A disconnected NAS is temporary. Remembering that as "this book has
+            // no cover" would suppress every retry until the app was restarted.
+            if outcome.fileWasReachable {
+                missingCoverKeys.insert(cacheKeyString)
+            }
             return nil
         }
 
@@ -556,6 +585,17 @@ final class ThumbnailCache {
     func invalidateMemoryCache() {
         thumbnailMemoryStore.removeAll()
         missingCoverKeys.removeAll()
+    }
+
+    /// Invalidates only files that changed. Bulk transfer commonly changes a few
+    /// covers; dropping the entire decoded cache makes unrelated visible rows pay
+    /// the disk-decode cost again.
+    func invalidate(itemIDs: some Sequence<UUID>) {
+        for itemID in itemIDs {
+            let key = itemID.uuidString
+            thumbnailMemoryStore.remove(forKey: key)
+            missingCoverKeys.remove(key)
+        }
     }
 
     func invalidateFailure(forItemID itemID: UUID?) {

@@ -1057,12 +1057,14 @@ struct CloudSyncSettingsView: View {
             titleVisibility: .visible
         ) {
             Button("この端末の蔵書をiCloudへ送る（1台目）") {
-                libraryStore.enableSyncSeedingCloud()
-                relaunch()
+                Task {
+                    if await libraryStore.enableSyncSeedingCloud() { relaunch() }
+                }
             }
             Button("iCloudの蔵書で置き換える（2台目以降）", role: .destructive) {
-                libraryStore.enableSyncReplacingLocalLibrary()
-                relaunch()
+                Task {
+                    if await libraryStore.enableSyncReplacingLocalLibrary() { relaunch() }
+                }
             }
             Button("キャンセル", role: .cancel) {}
         } message: {
@@ -1135,7 +1137,7 @@ struct CloudSyncSettingsView: View {
         while !Task.isCancelled {
             cloudAccount.updateUploadCounts(
                 libraryStore.mode == .cloud
-                    ? CloudUploadBacklog.counts(container: libraryStore.container)
+                    ? await CloudUploadBacklog.counts(container: libraryStore.container)
                     : nil
             )
             try? await Task.sleep(for: .seconds(5))

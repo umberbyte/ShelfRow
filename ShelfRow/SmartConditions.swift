@@ -47,7 +47,7 @@ enum BookTypeInfo {
     }
 }
 
-enum KeywordEquivalenceField: String, CaseIterable, Codable, Identifiable {
+enum KeywordEquivalenceField: String, CaseIterable, Codable, Identifiable, Sendable {
     case author
     case genre
     case relation
@@ -168,13 +168,13 @@ enum KeywordEquivalenceCodec {
 /// Serialized into `Shelf.smartConditionsJson` using the same top-level keys
 /// as the legacy Stackroom XML ("Keyword Condition", "Date Condition", ...)
 /// so that imported legacy definitions keep working.
-struct SmartConditions: Equatable {
-    struct Keyword: Equatable {
+struct SmartConditions: Equatable, Sendable {
+    struct Keyword: Equatable, Sendable {
         var field: String = "Title" // Title / Author / Genre / Relation / Keyword A / Keyword B / Neta
         var text: String = ""
         var mode: Int = 0           // 0 = contains, 1 = not contains, 2 = equals
     }
-    struct DateCondition: Equatable {
+    struct DateCondition: Equatable, Sendable {
         var field: Int = 0          // 0 = 登録した日, 1 = 最後に読んだ日
         var days: Int = 30
         var mode: Int = 0           // 0 = 日以内, 1 = 日以上前
@@ -271,7 +271,7 @@ enum SmartConditionsCodec {
     }
 
     /// Extracts the searchable string value of an Item for a keyword field key.
-    private static func fieldValue(of item: Item, forField field: String) -> String {
+    nonisolated private static func fieldValue(of item: LibraryItemSnapshot, forField field: String) -> String {
         switch field.lowercased() {
         case "title": return item.title
         case "author": return item.author
@@ -289,6 +289,16 @@ enum SmartConditionsCodec {
 
     /// Evaluates whether an Item matches all enabled conditions (AND semantics).
     static func matches(_ item: Item, conditions: SmartConditions, now: Date = Date()) -> Bool {
+        matches(LibraryItemSnapshot(item), conditions: conditions, now: now)
+    }
+
+    nonisolated static func matches(_ item: LibraryItemSnapshot, conditions: SmartConditions, now: Date = Date()) -> Bool {
+        matches(item, conditions: conditions, cutOff: conditions.date.map {
+            Calendar.current.date(byAdding: .day, value: -$0.days, to: now) ?? now
+        })
+    }
+
+    nonisolated static func matches(_ item: LibraryItemSnapshot, conditions: SmartConditions, cutOff: Date?) -> Bool {
         if let keyword = conditions.keyword, !keyword.text.isEmpty {
             let value = fieldValue(of: item, forField: keyword.field).lowercased()
             let key = keyword.text.lowercased()
@@ -301,7 +311,7 @@ enum SmartConditionsCodec {
 
         if let date = conditions.date {
             let target: Date? = date.field == 1 ? item.lastReadDate : item.addedDate
-            let cutOff = Calendar.current.date(byAdding: .day, value: -date.days, to: now) ?? now
+            guard let cutOff else { return false }
             switch date.mode {
             case 1: // 日以上前の項目
                 guard let target, target < cutOff else { return false }

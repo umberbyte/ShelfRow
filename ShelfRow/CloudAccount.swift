@@ -108,6 +108,7 @@ final class CloudAccountMonitor {
 
     /// Called by whatever is watching, since counting means reading the store.
     func updateUploadCounts(_ counts: CloudUploadCounts?) {
+        guard uploadCounts != counts else { return }
         uploadCounts = counts
     }
 

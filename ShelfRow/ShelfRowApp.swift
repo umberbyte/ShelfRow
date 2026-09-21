@@ -69,6 +69,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     static var shouldTerminateWhenMainWindowCloses: Bool {
+        #if DEBUG
+        // UI tests may need to recreate the main window after SwiftUI state
+        // restoration suppresses the initial WindowGroup. Keep the test host
+        // alive while it chooses File > New Window.
+        if ProcessInfo.processInfo.arguments.contains("--keyboard-navigation-test") {
+            return false
+        }
+        #endif
         // Default is ON (classic Stackroom behavior)
         if UserDefaults.standard.object(forKey: "advancedCloseOnExit") == nil {
             return true
@@ -177,6 +185,9 @@ struct ShelfRowApp: App {
     }
 
     private func watchAccount() {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--keyboard-navigation-test") { return }
+        #endif
         cloudAccount.onAvailabilityChange = { available in
             libraryStore.noteAccountAvailability(available)
         }

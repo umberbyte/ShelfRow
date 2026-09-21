@@ -10,7 +10,7 @@ import ImageIO
 
 /// A resolved on-disk location for an Item, retaining the security-scoped
 /// anchor URL so the caller can release access when finished.
-struct ResolvedItemFile {
+struct ResolvedItemFile: Sendable {
     let url: URL
     let securityAnchor: URL?
 

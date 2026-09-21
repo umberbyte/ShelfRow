@@ -591,6 +591,49 @@ struct CloudSyncRetryTests {
 /// The NAS folder thumbnails are handed around through.
 struct ThumbnailDistributionTests {
 
+    @Test func startupBackupIsThrottledForOneDay() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        #expect(StoreFileBackup.needsStartupBackup(lastBackupDate: nil, now: now))
+        #expect(!StoreFileBackup.needsStartupBackup(
+            lastBackupDate: now.addingTimeInterval(-(24 * 60 * 60 - 1)),
+            now: now
+        ))
+        #expect(StoreFileBackup.needsStartupBackup(
+            lastBackupDate: now.addingTimeInterval(-24 * 60 * 60),
+            now: now
+        ))
+    }
+
+    @Test func aMissingDistributionFileIsRepublishedAtTheSameVersion() {
+        let entry = ThumbnailDistribution.Manifest.Entry(version: 4, bytes: 42_000)
+
+        #expect(CoverUploadDecision.version(
+            manifestEntry: entry,
+            localBytes: 42_000,
+            lastErrorCode: NSFileReadNoSuchFileError
+        ) == 4)
+        #expect(CoverUploadDecision.version(
+            manifestEntry: entry,
+            localBytes: 42_000,
+            lastErrorCode: 0
+        ) == nil)
+    }
+
+    @Test func aChangedLocalCoverStillAdvancesTheVersion() {
+        let entry = ThumbnailDistribution.Manifest.Entry(version: 4, bytes: 42_000)
+
+        #expect(CoverUploadDecision.version(
+            manifestEntry: entry,
+            localBytes: 43_000,
+            lastErrorCode: NSFileReadNoSuchFileError
+        ) == 5)
+        #expect(CoverUploadDecision.version(
+            manifestEntry: nil,
+            localBytes: 43_000,
+            lastErrorCode: 0
+        ) == 1)
+    }
+
 
     @Test func aThumbnailIsFiledUnderTheFirstTwoCharactersOfItsIdentifier() {
         let root = URL(fileURLWithPath: "/Volumes/NAS/ShelfRowThumbnails", isDirectory: true)
@@ -689,21 +732,16 @@ struct ThumbnailDistributionTests {
         // configuration but missing from the container's own schema opens as
         // `configurationSchemaNotFoundInContainerSchema`, which the app cannot
         // start from. Opening it here, the way the app does, is the only check.
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("ShelfRowStoreTest-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
         let library = ModelConfiguration(
             "Library",
             schema: Schema(LibraryStore.libraryModels),
-            url: directory.appendingPathComponent("default.store"),
+            isStoredInMemoryOnly: true,
             cloudKitDatabase: .none
         )
         let local = ModelConfiguration(
             "Local",
             schema: Schema(LibraryStore.localModels),
-            url: directory.appendingPathComponent("local.store"),
+            isStoredInMemoryOnly: true,
             cloudKitDatabase: .none
         )
         let container = try ModelContainer(

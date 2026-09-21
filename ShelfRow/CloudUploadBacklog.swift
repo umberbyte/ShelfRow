@@ -34,44 +34,61 @@ struct CloudUploadCounts: Sendable, Equatable {
 }
 
 enum CloudUploadBacklog {
-    private static let logger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "CloudUploadBacklog")
+    private nonisolated static let logger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "CloudUploadBacklog")
 
-    /// Set once a read fails, so a schema that has moved is not re-probed on
-    /// every tick.
-    private nonisolated(unsafe) static var isUnavailable = false
+    nonisolated private final class ProbeState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var unavailable = false
+        private var didLogSchema = false
+
+        var canProbe: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return !unavailable
+        }
+
+        func stopProbing() {
+            lock.lock()
+            unavailable = true
+            lock.unlock()
+        }
+
+        func claimSchemaLog() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didLogSchema else { return false }
+            didLogSchema = true
+            return true
+        }
+    }
+
+    /// Once the private schema cannot be read, do not re-probe it every tick.
+    private nonisolated static let probeState = ProbeState()
 
     /// Records still to upload and records already taken, or nil when the store
     /// will not say.
     @MainActor
-    static func counts(container: ModelContainer) -> CloudUploadCounts? {
-        guard !isUnavailable,
+    static func counts(container: ModelContainer) async -> CloudUploadCounts? {
+        guard probeState.canProbe,
               let storeURL = container.configurations.first(where: { $0.name == "Library" })?.url else {
             return nil
         }
-        guard var counts = recordCounts(storeURL: storeURL) else { return nil }
+        guard var counts = await Task.detached(priority: .utility, operation: {
+            recordCounts(storeURL: storeURL)
+        }).value else { return nil }
+        let held = await CloudHeldCountReader(modelContainer: container).count()
         counts = CloudUploadCounts(
             pending: counts.pending,
             uploaded: counts.uploaded,
-            held: heldRecordCount(container: container)
+            held: held
         )
         return counts
-    }
-
-    @MainActor
-    private static func heldRecordCount(container: ModelContainer) -> Int {
-        let context = container.mainContext
-        var held = 0
-        held += (try? context.fetchCount(FetchDescriptor<Item>())) ?? 0
-        held += (try? context.fetchCount(FetchDescriptor<Shelf>())) ?? 0
-        held += (try? context.fetchCount(FetchDescriptor<Volume>())) ?? 0
-        held += (try? context.fetchCount(FetchDescriptor<CoverExtractionRecord>())) ?? 0
-        return held
     }
 
     /// Opens a second, read-only connection to the store Core Data is writing.
     /// SQLite allows this; the shared-memory file it needs is already there
     /// because this process has the store open.
-    private static func recordCounts(storeURL: URL) -> CloudUploadCounts? {
+    nonisolated private static func recordCounts(storeURL: URL) -> CloudUploadCounts? {
         var database: OpaquePointer?
         let uri = storeURL.absoluteString + "?mode=ro"
         guard sqlite3_open_v2(uri, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
@@ -104,7 +121,7 @@ enum CloudUploadBacklog {
         return CloudUploadCounts(pending: pending, uploaded: max(0, total - pending), held: 0)
     }
 
-    private static func column(matching pattern: String, of table: String, in database: OpaquePointer?) -> String? {
+    nonisolated private static func column(matching pattern: String, of table: String, in database: OpaquePointer?) -> String? {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
             return nil
@@ -120,7 +137,7 @@ enum CloudUploadBacklog {
         return nil
     }
 
-    private static func mirroringMetadataTable(in database: OpaquePointer?) -> String? {
+    nonisolated private static func mirroringMetadataTable(in database: OpaquePointer?) -> String? {
         let query = """
             SELECT name FROM sqlite_master
             WHERE type = 'table' AND upper(name) LIKE '%CKRECORDMETADATA%'
@@ -134,7 +151,7 @@ enum CloudUploadBacklog {
         return String(cString: name)
     }
 
-    private static func singleValue(_ query: String, in database: OpaquePointer?) -> Int? {
+    nonisolated private static func singleValue(_ query: String, in database: OpaquePointer?) -> Int? {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(statement) }
@@ -142,18 +159,27 @@ enum CloudUploadBacklog {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
-    private nonisolated(unsafe) static var didLogSchema = false
-
     /// One line, once per launch, so a schema that has drifted under an OS
     /// update can be recognised from the log rather than guessed at.
-    private static func logOnce(table: String, column: String, pending: Int, total: Int) {
-        guard !didLogSchema else { return }
-        didLogSchema = true
+    nonisolated private static func logOnce(table: String, column: String, pending: Int, total: Int) {
+        guard probeState.claimSchemaLog() else { return }
         logger.info("\(table, privacy: .public): \(pending, privacy: .public) of \(total, privacy: .public) rows still have \(column, privacy: .public) set")
     }
 
-    private static func markUnavailable(_ reason: String) {
-        isUnavailable = true
+    nonisolated private static func markUnavailable(_ reason: String) {
+        probeState.stopProbing()
         logger.info("Seed progress is unavailable (\(reason, privacy: .public)); falling back to activity only")
+    }
+}
+
+@ModelActor
+private actor CloudHeldCountReader {
+    func count() -> Int {
+        var held = 0
+        held += (try? modelContext.fetchCount(FetchDescriptor<Item>())) ?? 0
+        held += (try? modelContext.fetchCount(FetchDescriptor<Shelf>())) ?? 0
+        held += (try? modelContext.fetchCount(FetchDescriptor<Volume>())) ?? 0
+        held += (try? modelContext.fetchCount(FetchDescriptor<CoverExtractionRecord>())) ?? 0
+        return held
     }
 }

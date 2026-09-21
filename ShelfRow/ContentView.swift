@@ -7,10 +7,11 @@
 
 import SwiftUI
 import SwiftData
+import CoreData
 import UniformTypeIdentifiers
 import AppKit
 
-enum SidebarSelection: Hashable {
+nonisolated enum SidebarSelection: Hashable, Sendable {
     case allBooks
     case unreadBooks
     case shelf(UUID)
@@ -19,6 +20,53 @@ enum SidebarSelection: Hashable {
 /// Inspector text fields that can receive stamps (スタンプ) input.
 enum InspectorField: Hashable {
     case title, author, keywordA, keywordB, memo, genre, relation
+}
+
+private struct InspectorDraft: Equatable {
+    var title = ""
+    var author = ""
+    var keywordA = ""
+    var keywordB = ""
+    var memo = ""
+    var genre = ""
+    var relation = ""
+
+    init() {}
+
+    init(item: Item) {
+        title = item.title
+        author = item.author
+        keywordA = item.keywordA
+        keywordB = item.keywordB
+        memo = item.memo
+        genre = item.genre
+        relation = item.relation
+    }
+
+    subscript(field: InspectorField) -> String {
+        get {
+            switch field {
+            case .title: title
+            case .author: author
+            case .keywordA: keywordA
+            case .keywordB: keywordB
+            case .memo: memo
+            case .genre: genre
+            case .relation: relation
+            }
+        }
+        set {
+            switch field {
+            case .title: title = newValue
+            case .author: author = newValue
+            case .keywordA: keywordA = newValue
+            case .keywordB: keywordB = newValue
+            case .memo: memo = newValue
+            case .genre: genre = newValue
+            case .relation: relation = newValue
+            }
+        }
+    }
 }
 
 private struct ThumbnailRepairScanResult: Sendable {
@@ -81,6 +129,23 @@ private struct DroppedFilePageCountUpdate: Sendable {
     let shouldApplyAutoBookType: Bool
 }
 
+nonisolated private struct DroppedFileFact: Sendable {
+    let url: URL
+    let exists: Bool
+    let isDirectory: Bool
+}
+
+nonisolated private struct FileOperationOutcome: Sendable {
+    let succeeded: Bool
+    let errorDescription: String?
+
+    static let success = FileOperationOutcome(succeeded: true, errorDescription: nil)
+
+    static func failure(_ error: Error) -> FileOperationOutcome {
+        FileOperationOutcome(succeeded: false, errorDescription: error.localizedDescription)
+    }
+}
+
 private struct ShelfDropDelegate: DropDelegate {
     let targetShelfID: UUID
     let targetType: Int
@@ -121,7 +186,7 @@ private struct ShelfDropDelegate: DropDelegate {
 }
 
 /// Sort keys for the main content view (右クリック > 並び替え, list headers).
-enum ItemSortKey: String, CaseIterable, Identifiable {
+enum ItemSortKey: String, CaseIterable, Identifiable, Sendable {
     case unread, bookType, title, rating, author, genre, relation, keywordA, keywordB, addedDate, lastReadDate, pages
 
     var id: String { rawValue }
@@ -152,7 +217,7 @@ struct ContentView: View {
     @Environment(ThumbnailDistributionCoordinator.self) private var thumbnailDistribution
 
     // DB Queries
-    @Query(sort: \Item.title) private var allItems: [Item]
+    @Query private var allItems: [Item]
     @Query(sort: \Shelf.title) private var shelves: [Shelf]
 
     // AppStorage Settings (Customizable metadata labels; empty = classic default)
@@ -185,13 +250,35 @@ struct ContentView: View {
 
     // UI Selection and view states
     @State private var sidebarSelection: SidebarSelection? = .allBooks
-    @State private var selectedItemID: UUID? = nil
-    @State private var selectedItemIDs: Set<UUID> = []
-    @State private var selectionAnchorItemID: UUID? = nil
-    @State private var selectedDisplayIndex: Int? = nil
-    @State private var coverPrefetchTask: Task<Void, Never>? = nil
-    @State private var lastKeyboardScrollIndex: Int? = nil
-    @State private var scrollPositionItemID: UUID? = nil
+    @State private var selection = LibrarySelectionState()
+    private var coverPrefetchTask: Task<Void, Never>? {
+        get { selection.prefetchTask }
+        nonmutating set { selection.prefetchTask = newValue }
+    }
+    private var selectedItemID: UUID? {
+        get { selection.itemID }
+        nonmutating set { selection.itemID = newValue }
+    }
+    private var selectedItemIDs: Set<UUID> {
+        get { selection.itemIDs }
+        nonmutating set { selection.itemIDs = newValue }
+    }
+    private var selectionAnchorItemID: UUID? {
+        get { selection.anchorID }
+        nonmutating set { selection.anchorID = newValue }
+    }
+    private var selectedDisplayIndex: Int? {
+        get { selection.index }
+        nonmutating set { selection.index = newValue }
+    }
+    private var lastKeyboardScrollIndex: Int? {
+        get { selection.lastScrollIndex }
+        nonmutating set { selection.lastScrollIndex = newValue }
+    }
+    private var keyboardScrollTargetID: UUID? {
+        get { selection.scrollTargetID }
+        nonmutating set { selection.scrollTargetID = newValue }
+    }
     @AppStorage("mainViewIsGrid") private var isGridView = false
 
     // Live Filters (classic toolbar segments)
@@ -209,6 +296,25 @@ struct ContentView: View {
 
     // Cached filtered/sorted items (recomputed only when displayToken changes)
     @State private var displayItems: [Item] = []
+    @State private var displayRows: [LibraryDisplayRow] = []
+    @State private var libraryItemCount = 0
+    @State private var projectionTask: Task<Void, Never>?
+    @State private var isUpdatingLibrary = false
+    @State private var hasLoadedLibrary = false
+    @State private var unreadCount = 0
+    @State private var shelfCounts: [UUID: Int] = [:]
+    @State private var libraryGeneration: UInt64 = 1
+    @State private var snapshotGeneration: UInt64 = 0
+    @State private var projectionItems: [LibraryItemSnapshot] = []
+    @State private var projectionShelves: [LibraryShelfSnapshot] = []
+    @State private var projectionModels: [UUID: Item] = [:]
+    @State private var projectionIndices: [UUID: Int] = [:]
+    @State private var pendingUpdatedItemIDs: Set<UUID> = []
+    @State private var requiresFullProjectionSnapshot = true
+    @State private var inspectorDraft = InspectorDraft()
+    @State private var inspectorDraftItemID: UUID?
+    @State private var inspectorDraftIsDirty = false
+
 
     // Security simple lock state
     @State private var isLocked = false
@@ -234,6 +340,7 @@ struct ContentView: View {
 
     // Drag & drop batch registration state
     @State private var dropQueueRemaining = 0
+    @State private var isPerformingFileOperation = false
     @State private var draggingShelfID: UUID? = nil
     @State private var staticShelfOrderIDs: [UUID] = []
     @State private var smartShelfOrderIDs: [UUID] = []
@@ -243,6 +350,7 @@ struct ContentView: View {
 
     @FocusState private var mainContentHasFocus: Bool
     @FocusState private var focusedShelfTitleID: UUID?
+    @FocusState private var focusedInspectorField: InspectorField?
 
     private var selectedItem: Item? {
         guard let selectedID = selectedItemID else { return nil }
@@ -378,7 +486,7 @@ struct ContentView: View {
                     // user-adjusted widths; window resizing is absorbed by the
                     // flexible list/grid pane in the middle.
                     HSplitView {
-                        sidebarPane
+                        LibraryPane { sidebarPane }
                             .frame(
                                 minWidth: displayMetrics.size(240),
                                 idealWidth: displayMetrics.size(260),
@@ -386,10 +494,10 @@ struct ContentView: View {
                             )
                             .background(SplitViewAutosave(name: "ShelfRow.MainSplitView"))
 
-                        mainContentPane
+                        LibraryPane { mainContentPane }
                             .frame(minWidth: 620, maxWidth: .infinity)
 
-                        detailPane
+                        LibraryPane { detailPane }
                             .frame(
                                 minWidth: displayMetrics.size(300),
                                 idealWidth: displayMetrics.size(320),
@@ -461,16 +569,14 @@ struct ContentView: View {
         .overlay {
             if isImporting {
                 importProgressOverlay
+            } else if isPerformingFileOperation {
+                ProgressView("NAS上のファイルを処理しています…")
+                    .padding(20)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
-        .task(id: libraryStore.mode) {
-            // Away from the NAS this finds nothing to do and says nothing about
-            // it, which is the point: not being able to reach the share is the
-            // normal state of a laptop, not a fault to report.
-            try? await Task.sleep(for: .seconds(5))
-            await thumbnailDistribution.considerAutomaticWork()
-        }
         .onAppear {
+            refreshDisplayItems()
             // Apply security lock if enabled
             if lockEnabled && !passwordValue.isEmpty {
                 isLocked = true
@@ -868,10 +974,10 @@ struct ContentView: View {
                 List {
                     Section {
                         sidebarSelectionButton(.allBooks) {
-                            sidebarLibraryLabel("すべての項目", systemImage: "doc.text", count: allItems.count)
+                            sidebarLibraryLabel("すべての項目", systemImage: "doc.text", count: libraryItemCount)
                         }
                         sidebarSelectionButton(.unreadBooks) {
-                            sidebarLibraryLabel("未読", systemImage: "circle.fill", count: allItems.filter(\.isUnread).count)
+                            sidebarLibraryLabel("未読", systemImage: "circle.fill", count: unreadCount)
                         }
                     } header: {
                         sidebarSectionHeader("ライブラリ")
@@ -1079,15 +1185,6 @@ struct ContentView: View {
             .background(Capsule().fill(isDarkAppearance ? Color.white.opacity(0.14) : Color.black.opacity(0.28)))
     }
 
-    private func shelfItemCount(_ shelf: Shelf) -> Int {
-        if shelf.type == 1 {
-            let conditions = SmartConditionsCodec.decode(shelf.smartConditionsJson)
-            let now = Date()
-            return allItems.filter { SmartConditionsCodec.matches($0, conditions: conditions, now: now) }.count
-        }
-        return shelf.items?.count ?? 0
-    }
-
     private func shelfLabel(_ shelf: Shelf) -> some View {
         HStack(spacing: displayMetrics.space(10)) {
             Image(systemName: shelf.type == 1 ? "gearshape" : BookTypeInfo.systemImage(for: shelf.icon))
@@ -1114,21 +1211,13 @@ struct ContentView: View {
                     .foregroundStyle(primaryTextColor)
             }
             Spacer()
-            countBadge(shelfItemCount(shelf))
+            countBadge(shelfCounts[shelf.id] ?? 0)
         }
         .padding(.horizontal, displayMetrics.space(8))
         .padding(.vertical, displayMetrics.space(6))
     }
 
     // MARK: - List Columns (shared by the header and each row for alignment)
-    private struct ListColumn: Identifiable {
-        let key: ItemSortKey
-        let title: String
-        let width: CGFloat?   // nil = flexible (title column)
-        let alignment: Alignment
-        var id: String { key.rawValue }
-    }
-
     /// Canonical column order; the visible subset is filtered from this.
     /// The title column is always shown and cannot be toggled off.
     private static let columnOrder: [ItemSortKey] = [
@@ -1172,11 +1261,11 @@ struct ContentView: View {
     }
 
     /// The currently visible columns, in canonical order (title always shown).
-    private var listColumns: [ListColumn] {
+    private var listColumns: [LibraryListColumn] {
         let visible = visibleColumnKeys
         return Self.columnOrder
             .filter { $0 == .title || visible.contains($0.rawValue) }
-            .map { ListColumn(key: $0, title: $0.label, width: columnWidth($0), alignment: columnAlignment($0)) }
+            .map { LibraryListColumn(key: $0, title: $0.label, width: columnWidth($0), alignment: columnAlignment($0)) }
     }
 
     private func toggleColumn(_ key: ItemSortKey) {
@@ -1197,21 +1286,27 @@ struct ContentView: View {
     private var mainContentPane: some View {
         VStack(spacing: 0) {
             let itemsToDisplay = displayItems
+            let rowColumns = listColumns
+            let rowTypeNames = typeNames
 
             modernMainHeader
 
             Divider()
                 .overlay(separatorTintColor)
 
-            if itemsToDisplay.isEmpty {
+            if !hasLoadedLibrary {
+                ProgressView("ライブラリを読み込み中…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(modernSurfaceColor)
+            } else if itemsToDisplay.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "folder")
                         .font(.system(size: 40))
                         .foregroundStyle(tertiaryTextColor)
-                    Text(allItems.isEmpty ? "ライブラリは空です。" : "該当する本がありません。")
+                    Text(libraryItemCount == 0 ? "ライブラリは空です。" : "該当する本がありません。")
                         .font(.headline)
                         .foregroundStyle(secondaryTextColor)
-                    if allItems.isEmpty {
+                    if libraryItemCount == 0 {
                         Text("ZIPや画像フォルダをここにドラッグ＆ドロップして追加できます。")
                             .font(.caption)
                             .foregroundStyle(tertiaryTextColor)
@@ -1223,7 +1318,7 @@ struct ContentView: View {
                 if isGridView {
                     // Grid view: sort control bar on top
                     GeometryReader { geometry in
-                        ScrollView {
+                        LibraryKeyboardScrollView(targetID: keyboardScrollTargetID, focus: $mainContentHasFocus) {
                             LazyVGrid(
                                 columns: [GridItem(
                                     .adaptive(
@@ -1234,7 +1329,8 @@ struct ContentView: View {
                                 )],
                                 spacing: displayMetrics.rowSpace(16)
                             ) {
-                                ForEach(itemsToDisplay) { item in
+                                ForEach(displayRows) { row in
+                                    let item = row.item
                                     // Double-tap must be attached BEFORE single-tap,
                                     // otherwise the single-tap gesture swallows it.
                                     GridItemCardView(item: item, isSelected: isItemSelected(item), metrics: displayMetrics)
@@ -1247,18 +1343,14 @@ struct ContentView: View {
                                 }
                             }
                             .padding()
-                            .scrollTargetLayout()
                         }
-                        .scrollPosition(id: $scrollPositionItemID)
                         .background(modernSurfaceColor)
-                        .focusable()
-                        .focused($mainContentHasFocus)
-                        .onKeyPress(.upArrow) {
-                            moveSelection(by: -gridKeyboardStep(for: geometry.size.width), extending: currentEventIsShiftModified())
+                        .onKeyPress(.upArrow, phases: [.down, .repeat]) { press in
+                            moveSelection(by: -gridKeyboardStep(for: geometry.size.width), extending: press.modifiers.contains(.shift))
                             return .handled
                         }
-                        .onKeyPress(.downArrow) {
-                            moveSelection(by: gridKeyboardStep(for: geometry.size.width), extending: currentEventIsShiftModified())
+                        .onKeyPress(.downArrow, phases: [.down, .repeat]) { press in
+                            moveSelection(by: gridKeyboardStep(for: geometry.size.width), extending: press.modifiers.contains(.shift))
                             return .handled
                         }
                         .onKeyPress(.return) {
@@ -1286,10 +1378,12 @@ struct ContentView: View {
                     // SwiftUI List on macOS still fights custom single/double
                     // click gestures and made repeated key navigation sluggish
                     // with large libraries.
-                    ScrollView {
+                    LibraryKeyboardScrollView(targetID: keyboardScrollTargetID, focus: $mainContentHasFocus) {
                         LazyVStack(spacing: 0) {
-                            ForEach(itemsToDisplay.enumerated(), id: \.element.id) { index, item in
-                                classicListRow(item: item, isSelected: isItemSelected(item))
+                            ForEach(displayRows) { row in
+                                let item = row.item
+                                let index = row.index
+                                LibraryListRow(item: item, isSelected: isItemSelected(item), displayMetrics: displayMetrics, columns: rowColumns, typeNames: rowTypeNames)
                                     .frame(maxWidth: .infinity, minHeight: displayMetrics.size(30), alignment: .leading)
                                     .padding(.horizontal, displayMetrics.space(12))
                                     .padding(.vertical, displayMetrics.rowSpace(5))
@@ -1309,21 +1403,21 @@ struct ContentView: View {
                                     .contextMenu {
                                         itemContextMenu(item)
                                     }
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityLabel(item.title)
+                                    .accessibilityValue(isItemSelected(item) ? "選択中" : "未選択")
+                                    .accessibilityAddTraits(isItemSelected(item) ? .isSelected : [])
+                                    .accessibilityIdentifier("libraryRow-\(item.title)")
                             }
                         }
-                        .scrollTargetLayout()
                     }
-                    .scrollPosition(id: $scrollPositionItemID)
                     .background(modernSurfaceColor)
-                    .focusable()
-                    .focused($mainContentHasFocus)
-                    .focusEffectDisabled()
-                    .onKeyPress(.downArrow) {
-                        moveSelection(by: 1, extending: currentEventIsShiftModified())
+                    .onKeyPress(.downArrow, phases: [.down, .repeat]) { press in
+                        moveSelection(by: 1, extending: press.modifiers.contains(.shift))
                         return .handled
                     }
-                    .onKeyPress(.upArrow) {
-                        moveSelection(by: -1, extending: currentEventIsShiftModified())
+                    .onKeyPress(.upArrow, phases: [.down, .repeat]) { press in
+                        moveSelection(by: -1, extending: press.modifiers.contains(.shift))
                         return .handled
                     }
                     .onKeyPress(.return) {
@@ -1346,13 +1440,33 @@ struct ContentView: View {
         }
         // Recompute the (cached) filtered/sorted list only when inputs change,
         // not on every selection/keystroke elsewhere.
-        .onAppear {
-            displayItems = computeFilteredItems()
-            refreshSelectedDisplayIndex()
-        }
         .onChange(of: displayToken) { _, _ in
-            displayItems = computeFilteredItems()
-            refreshSelectedDisplayIndex()
+            refreshDisplayItems()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ModelContext.didSave)) { notification in
+            handleModelSave(notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange)) { _ in
+            markLibrarySnapshotDirty()
+            refreshDisplayItems()
+            thumbnailDistribution.scheduleAutomaticWork()
+        }
+        .onDisappear {
+            projectionTask?.cancel()
+            coverPrefetchTask?.cancel()
+        }
+        .overlay(alignment: .topTrailing) {
+            if hasLoadedLibrary && isUpdatingLibrary {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("一覧を更新中…").font(.caption)
+                }
+                .padding(8)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .padding(8)
+                .allowsHitTesting(false)
+                .accessibilityLabel("一覧を更新中")
+            }
         }
     }
 
@@ -1455,82 +1569,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Classic List Row (columns aligned to the header)
-    private func classicListRow(item: Item, isSelected: Bool) -> some View {
-        HStack(spacing: displayMetrics.space(8)) {
-            ForEach(listColumns) { col in
-                listCell(col, item, isSelected: isSelected)
-                    .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: col.alignment)
-                    .frame(width: col.width, alignment: col.alignment)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func listCell(_ col: ListColumn, _ item: Item, isSelected: Bool) -> some View {
-        // Primary/secondary text turns white on the selection highlight.
-        let primaryColor: Color = isSelected ? .white : (isDarkAppearance ? primaryTextColor : .black)
-        let secondaryColor: Color = isSelected ? .white.opacity(0.88) : (isDarkAppearance ? secondaryTextColor : .black)
-        switch col.key {
-        case .unread:
-            // Green circle like classic "O"
-            Circle()
-                .stroke(isSelected ? Color.white : Color.green, lineWidth: 1.5)
-                .frame(width: displayMetrics.size(8), height: displayMetrics.size(8))
-                .opacity(item.isUnread ? 1 : 0)
-        case .bookType:
-            Image(systemName: BookTypeInfo.systemImage(for: item.bookType))
-                .font(displayMetrics.font(15))
-                .foregroundColor(isSelected ? .white : BookTypeInfo.color(for: item.bookType))
-                .help(typeNames.indices.contains(item.bookType) ? typeNames[item.bookType] : "")
-        case .title:
-            Text(item.title)
-                .font(displayMetrics.font(14))
-                .foregroundColor(primaryColor)
-                .lineLimit(1)
-        case .rating:
-            RatingView(rating: .constant(item.rating), interactive: false)
-                .font(displayMetrics.font(11))
-        case .author:
-            Text(item.author)
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        case .genre:
-            Text(item.genre)
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        case .relation:
-            Text(item.relation)
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        case .keywordA:
-            Text(item.keywordA)
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        case .keywordB:
-            Text(item.keywordB)
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        case .lastReadDate:
-            Text(item.lastReadDate?.formatted(date: .numeric, time: .omitted) ?? "—")
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        case .addedDate:
-            Text(item.addedDate.formatted(date: .numeric, time: .omitted))
-                .font(displayMetrics.font(13))
-                .foregroundColor(secondaryColor)
-                .lineLimit(1)
-        default:
-            EmptyView()
-        }
-    }
-
     // MARK: - Detail Pane (Classic Right Inspector sidepanel)
     private var detailPane: some View {
         Group {
@@ -1570,7 +1608,7 @@ struct ContentView: View {
                 }
                 .padding(.top, displayMetrics.space(20))
 
-                Text(item.title)
+                Text(inspectorDraftItemID == item.id ? inspectorDraft.title : item.title)
                     .font(displayMetrics.font(18, weight: .bold))
                     .foregroundStyle(inspectorTextColor)
                     .lineLimit(2)
@@ -1578,7 +1616,10 @@ struct ContentView: View {
 
                 Toggle("未読にする", isOn: Binding(
                     get: { item.isUnread },
-                    set: { item.isUnread = $0 }
+                    set: {
+                        item.isUnread = $0
+                        try? modelContext.save()
+                    }
                 ))
                 .toggleStyle(.checkbox)
                 .font(displayMetrics.font(13))
@@ -1589,15 +1630,15 @@ struct ContentView: View {
 
                 // Form with customized labels from Customize Settings Tab!
                 VStack(spacing: displayMetrics.space(8)) {
-                    inspectorFieldRow(label: "タイトル:", field: .title, text: Binding(
-                        get: { item.title },
-                        set: { item.title = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: "タイトル:", field: .title,
+                        text: inspectorBinding(for: .title, item: item), item: item
+                    )
 
-                    inspectorFieldRow(label: customName(fieldAuthor, default: "作者") + ":", field: .author, text: Binding(
-                        get: { item.author },
-                        set: { item.author = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: customName(fieldAuthor, default: "作者") + ":", field: .author,
+                        text: inspectorBinding(for: .author, item: item), item: item
+                    )
 
                     HStack {
                         Text("レート:")
@@ -1606,35 +1647,38 @@ struct ContentView: View {
                             .frame(width: displayMetrics.size(78), alignment: .trailing)
                         RatingView(rating: Binding(
                             get: { item.rating },
-                            set: { item.rating = $0 }
+                            set: {
+                                item.rating = $0
+                                try? modelContext.save()
+                            }
                         ))
                         Spacer()
                     }
 
-                    inspectorFieldRow(label: customName(fieldKeywordA, default: "キーワードA") + ":", field: .keywordA, text: Binding(
-                        get: { item.keywordA },
-                        set: { item.keywordA = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: customName(fieldKeywordA, default: "キーワードA") + ":", field: .keywordA,
+                        text: inspectorBinding(for: .keywordA, item: item), item: item
+                    )
 
-                    inspectorFieldRow(label: customName(fieldKeywordB, default: "キーワードB") + ":", field: .keywordB, text: Binding(
-                        get: { item.keywordB },
-                        set: { item.keywordB = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: customName(fieldKeywordB, default: "キーワードB") + ":", field: .keywordB,
+                        text: inspectorBinding(for: .keywordB, item: item), item: item
+                    )
 
-                    inspectorFieldRow(label: "メモ:", field: .memo, text: Binding(
-                        get: { item.memo },
-                        set: { item.memo = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: "メモ:", field: .memo,
+                        text: inspectorBinding(for: .memo, item: item), item: item
+                    )
 
-                    inspectorFieldRow(label: customName(fieldGenre, default: "ジャンル") + ":", field: .genre, text: Binding(
-                        get: { item.genre },
-                        set: { item.genre = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: customName(fieldGenre, default: "ジャンル") + ":", field: .genre,
+                        text: inspectorBinding(for: .genre, item: item), item: item
+                    )
 
-                    inspectorFieldRow(label: customName(fieldRelation, default: "関連") + ":", field: .relation, text: Binding(
-                        get: { item.relation },
-                        set: { item.relation = $0 }
-                    ))
+                    inspectorFieldRow(
+                        label: customName(fieldRelation, default: "関連") + ":", field: .relation,
+                        text: inspectorBinding(for: .relation, item: item), item: item
+                    )
                 }
                 .padding(.horizontal, 14)
 
@@ -1656,9 +1700,69 @@ struct ContentView: View {
             .padding(.bottom, displayMetrics.space(20))
         }
         .background(modernPanelColor)
+        .task(id: item.id) {
+            prepareInspectorDraft(for: item)
+        }
+        .onChange(of: focusedInspectorField) { oldValue, newValue in
+            if oldValue != nil, oldValue != newValue {
+                commitInspectorDraft(for: item)
+            }
+        }
+        .onDisappear {
+            commitInspectorDraft(for: item)
+        }
     }
 
-    private func inspectorFieldRow(label: String, field: InspectorField, text: Binding<String>) -> some View {
+    private func prepareInspectorDraft(for item: Item) {
+        guard inspectorDraftItemID != item.id else { return }
+        inspectorDraft = InspectorDraft(item: item)
+        inspectorDraftItemID = item.id
+        inspectorDraftIsDirty = false
+    }
+
+    private func inspectorBinding(for field: InspectorField, item: Item) -> Binding<String> {
+        Binding(
+            get: {
+                guard inspectorDraftItemID == item.id else {
+                    return InspectorDraft(item: item)[field]
+                }
+                return inspectorDraft[field]
+            },
+            set: { value in
+                if inspectorDraftItemID != item.id {
+                    inspectorDraft = InspectorDraft(item: item)
+                    inspectorDraftItemID = item.id
+                }
+                inspectorDraft[field] = value
+                inspectorDraftIsDirty = true
+            }
+        )
+    }
+
+    private func commitInspectorDraft(for item: Item) {
+        guard inspectorDraftItemID == item.id, inspectorDraftIsDirty else { return }
+        let draft = inspectorDraft
+        item.title = draft.title
+        item.author = draft.author
+        item.keywordA = draft.keywordA
+        item.keywordB = draft.keywordB
+        item.memo = draft.memo
+        item.genre = draft.genre
+        item.relation = draft.relation
+        do {
+            try modelContext.save()
+            inspectorDraftIsDirty = false
+        } catch {
+            openErrorMessage = "属性情報を保存できませんでした。\n\n\(error.localizedDescription)"
+        }
+    }
+
+    private func inspectorFieldRow(
+        label: String,
+        field: InspectorField,
+        text: Binding<String>,
+        item: Item
+    ) -> some View {
         VStack(alignment: .leading, spacing: displayMetrics.space(4)) {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
@@ -1667,6 +1771,8 @@ struct ContentView: View {
                     .frame(width: displayMetrics.size(78), alignment: .trailing)
 
                 TextField("", text: text)
+                    .focused($focusedInspectorField, equals: field)
+                    .onSubmit { commitInspectorDraft(for: item) }
                     .textFieldStyle(.plain)
                     .font(displayMetrics.font(13))
                     .foregroundStyle(inspectorTextColor)
@@ -1739,7 +1845,6 @@ struct ContentView: View {
             sidebarSelection = .allBooks
         }
         searchText = keyword
-        displayItems = computeFilteredItems()
         selectedItemID = nil
         selectedItemIDs.removeAll()
         selectionAnchorItemID = nil
@@ -1768,7 +1873,7 @@ struct ContentView: View {
     // MARK: - Classic Status Bar (Bottom Bar)
     private var classicStatusBarView: some View {
         HStack {
-            Text("合計: \(displayItems.count)件の本 / \(allItems.count)冊中")
+            Text("合計: \(displayItems.count)件の本 / \(libraryItemCount)冊中")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
 
@@ -1843,133 +1948,184 @@ struct ContentView: View {
             typeFilterSelection.sorted().map(String.init).joined(separator: ","),
             sortKey.rawValue,
             String(sortAscending),
-            String(allItems.count),
             String(shelves.count)
         ].joined(separator: "|")
     }
 
-    private func computeFilteredItems() -> [Item] {
-        var items = allItems
+    private func identifiers(
+        in notification: Notification,
+        for key: ModelContext.NotificationKey
+    ) -> [PersistentIdentifier] {
+        let value = notification.userInfo?[key] ?? notification.userInfo?[key.rawValue]
+        if let identifiers = value as? Set<PersistentIdentifier> { return Array(identifiers) }
+        if let identifiers = value as? [PersistentIdentifier] { return identifiers }
+        return []
+    }
 
-        // 1. Sidebar Selection
-        if let selection = sidebarSelection {
-            switch selection {
-            case .allBooks:
-                break
-            case .unreadBooks:
-                items = items.filter { $0.isUnread }
-            case .shelf(let shelfID):
-                if let shelf = shelves.first(where: { $0.id == shelfID }) {
-                    if shelf.type == 1 {
-                        let conditions = SmartConditionsCodec.decode(shelf.smartConditionsJson)
-                        let now = Date()
-                        items = items.filter { SmartConditionsCodec.matches($0, conditions: conditions, now: now) }
-                    } else {
-                        let ids = Set((shelf.items ?? []).map { $0.id })
-                        items = items.filter { ids.contains($0.id) }
+    private func isEntity(_ identifier: PersistentIdentifier, named name: String) -> Bool {
+        identifier.entityName == name || identifier.entityName.hasSuffix(".\(name)")
+    }
+
+    /// Ignores saves that only touched device-local cover/bookmark bookkeeping.
+    /// A single Item update patches the cached value snapshot in place; inserts,
+    /// deletes and Shelf changes rebuild because they can alter ordering or
+    /// membership throughout the library.
+    private func handleModelSave(_ notification: Notification) {
+        // ModelContext.didSave is process-wide. Ignore scratch/import/test stores:
+        // their persistent identifiers cannot be resolved by this container and
+        // are unrelated to the visible library in any case.
+        guard let savingContext = notification.object as? ModelContext,
+              savingContext.container === modelContext.container else { return }
+
+        let inserted = identifiers(in: notification, for: .insertedIdentifiers)
+        let updated = identifiers(in: notification, for: .updatedIdentifiers)
+        let deleted = identifiers(in: notification, for: .deletedIdentifiers)
+        let invalidated = identifiers(in: notification, for: .invalidatedAllIdentifiers)
+        let allChanged = inserted + updated + deleted + invalidated
+
+        guard !allChanged.isEmpty else {
+            if savingContext === modelContext {
+                markLibrarySnapshotDirty()
+                refreshDisplayItems()
+            }
+            return
+        }
+
+        let itemName = String(describing: Item.self)
+        let shelfName = String(describing: Shelf.self)
+        let relevant = allChanged.filter {
+            isEntity($0, named: itemName) || isEntity($0, named: shelfName)
+        }
+        guard !relevant.isEmpty else { return }
+
+        let structuralChange = !(inserted + deleted + invalidated).filter {
+            isEntity($0, named: itemName) || isEntity($0, named: shelfName)
+        }.isEmpty || updated.contains { isEntity($0, named: shelfName) }
+
+        libraryGeneration &+= 1
+        if structuralChange {
+            requiresFullProjectionSnapshot = true
+            pendingUpdatedItemIDs.removeAll()
+        } else {
+            let changedItems = updated.compactMap { identifier -> UUID? in
+                guard isEntity(identifier, named: itemName),
+                      let item = modelContext.model(for: identifier) as? Item else { return nil }
+                return item.id
+            }
+            if changedItems.count == relevant.count {
+                pendingUpdatedItemIDs.formUnion(changedItems)
+            } else {
+                requiresFullProjectionSnapshot = true
+                pendingUpdatedItemIDs.removeAll()
+            }
+        }
+        refreshDisplayItems()
+    }
+
+    private func markLibrarySnapshotDirty() {
+        libraryGeneration &+= 1
+        requiresFullProjectionSnapshot = true
+        pendingUpdatedItemIDs.removeAll()
+    }
+
+    /// Capture SwiftData only when the library generation changes. Search, filter
+    /// and sort changes reuse the value snapshots and model lookup table, then run
+    /// the projection off the UI actor.
+    private func refreshDisplayItems() {
+        projectionTask?.cancel()
+        projectionTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+                isUpdatingLibrary = true
+                let generation = libraryGeneration
+
+                if requiresFullProjectionSnapshot || snapshotGeneration == 0 {
+                    let source = allItems
+                    var values: [LibraryItemSnapshot] = []
+                    var models: [UUID: Item] = [:]
+                    var indices: [UUID: Int] = [:]
+                    values.reserveCapacity(source.count)
+                    models.reserveCapacity(source.count)
+                    indices.reserveCapacity(source.count)
+                    for (index, item) in source.enumerated() {
+                        try Task.checkCancellation()
+                        values.append(LibraryItemSnapshot(item))
+                        models[item.id] = item
+                        indices[item.id] = index
+                        if index.isMultiple(of: 64) { await Task.yield() }
                     }
+                    projectionItems = values
+                    projectionModels = models
+                    projectionIndices = indices
+                    projectionShelves = shelves.map { shelf in
+                        LibraryShelfSnapshot(
+                            id: shelf.id,
+                            conditions: shelf.type == 1 ? SmartConditionsCodec.decode(shelf.smartConditionsJson) : nil,
+                            itemIDs: shelf.type == 1 ? [] : Set((shelf.items ?? []).map(\.id))
+                        )
+                    }
+                    requiresFullProjectionSnapshot = false
+                    pendingUpdatedItemIDs.removeAll()
+                    snapshotGeneration = generation
+                } else if snapshotGeneration != generation {
+                    for itemID in pendingUpdatedItemIDs {
+                        guard let index = projectionIndices[itemID],
+                              projectionItems.indices.contains(index),
+                              let item = projectionModels[itemID] else {
+                            requiresFullProjectionSnapshot = true
+                            break
+                        }
+                        projectionItems[index] = LibraryItemSnapshot(item)
+                    }
+                    if requiresFullProjectionSnapshot {
+                        isUpdatingLibrary = false
+                        refreshDisplayItems()
+                        return
+                    }
+                    pendingUpdatedItemIDs.removeAll()
+                    snapshotGeneration = generation
                 }
+
+                let values = projectionItems
+                let shelfValues = projectionShelves
+                let request = LibraryProjectionRequest(
+                    selection: sidebarSelection, search: searchText,
+                    equivalenceJSON: keywordEquivalenceRulesJson,
+                    unreadOnly: unreadFilterSelection == 1,
+                    ratings: ratingFilterSelection, types: typeFilterSelection,
+                    sortKey: sortKey, ascending: sortAscending
+                )
+                let result = try await LibraryProjectionWorker.shared.project(
+                    values,
+                    shelves: shelfValues,
+                    request: request,
+                    generation: generation
+                )
+                try Task.checkCancellation()
+                guard generation == libraryGeneration else {
+                    isUpdatingLibrary = false
+                    refreshDisplayItems()
+                    return
+                }
+                let orderedItems = result.ids.compactMap { projectionModels[$0] }
+                displayItems = orderedItems
+                displayRows = orderedItems.enumerated().map { LibraryDisplayRow(id: $0.element.id, index: $0.offset, item: $0.element) }
+                libraryItemCount = projectionItems.count
+                hasLoadedLibrary = true
+                unreadCount = result.unreadCount
+                shelfCounts = result.shelfCounts
+                isUpdatingLibrary = false
+                refreshSelectedDisplayIndex()
+            } catch is CancellationError {
+                // The replacement task owns the progress indicator.
+            } catch {
+                isUpdatingLibrary = false
             }
         }
-
-        // 2. Search Text
-        if !searchText.isEmpty {
-            let lowerText = KeywordEquivalenceCodec.normalize(searchText)
-            let rules = KeywordEquivalenceCodec.decode(keywordEquivalenceRulesJson)
-            let equivalentTerms = KeywordEquivalenceCodec.searchTerms(for: searchText, rules: rules)
-            items = items.filter { item in
-                itemMatchesSearch(item, normalizedQuery: lowerText, equivalentTerms: equivalentTerms)
-            }
-        }
-
-        // 3. Unread check filter: ALL | O
-        if unreadFilterSelection == 1 {
-            items = items.filter { $0.isUnread }
-        }
-
-        // 4. Rating star filter (multi-select)
-        if !ratingFilterSelection.isEmpty {
-            items = items.filter { ratingFilterSelection.contains($0.rating) }
-        }
-
-        // 5. Book Type filter (multi-select)
-        if !typeFilterSelection.isEmpty {
-            items = items.filter { typeFilterSelection.contains($0.bookType) }
-        }
-
-        // 6. Sort (右クリック > 並び替え)
-        return sortItems(items)
-    }
-
-    private func itemMatchesSearch(_ item: Item, normalizedQuery: String, equivalentTerms: [KeywordEquivalenceField: [String]]) -> Bool {
-        let baseValues = [
-            item.title,
-            item.author,
-            item.genre,
-            item.relation,
-            item.memo,
-            item.keywordA,
-            item.keywordB
-        ]
-        if baseValues.contains(where: { KeywordEquivalenceCodec.normalize($0).contains(normalizedQuery) }) {
-            return true
-        }
-
-        for (field, terms) in equivalentTerms {
-            let value = KeywordEquivalenceCodec.normalize(field.value(in: item))
-            if terms.contains(where: { value.contains(KeywordEquivalenceCodec.normalize($0)) }) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private func sortItems(_ items: [Item]) -> [Item] {
-        // Secondary key is always title for a stable, intuitive order.
-        func byTitle(_ a: Item, _ b: Item) -> Bool {
-            a.title.localizedStandardCompare(b.title) == .orderedAscending
-        }
-        let sorted: [Item]
-        switch sortKey {
-        case .title:
-            sorted = items.sorted(by: byTitle)
-        case .author:
-            sorted = items.sorted { $0.author != $1.author
-                ? $0.author.localizedStandardCompare($1.author) == .orderedAscending : byTitle($0, $1) }
-        case .genre:
-            sorted = items.sorted { $0.genre != $1.genre
-                ? $0.genre.localizedStandardCompare($1.genre) == .orderedAscending : byTitle($0, $1) }
-        case .relation:
-            sorted = items.sorted { $0.relation != $1.relation
-                ? $0.relation.localizedStandardCompare($1.relation) == .orderedAscending : byTitle($0, $1) }
-        case .keywordA:
-            sorted = items.sorted { $0.keywordA != $1.keywordA
-                ? $0.keywordA.localizedStandardCompare($1.keywordA) == .orderedAscending : byTitle($0, $1) }
-        case .keywordB:
-            sorted = items.sorted { $0.keywordB != $1.keywordB
-                ? $0.keywordB.localizedStandardCompare($1.keywordB) == .orderedAscending : byTitle($0, $1) }
-        case .rating:
-            sorted = items.sorted { $0.rating != $1.rating ? $0.rating < $1.rating : byTitle($0, $1) }
-        case .bookType:
-            sorted = items.sorted { $0.bookType != $1.bookType ? $0.bookType < $1.bookType : byTitle($0, $1) }
-        case .unread:
-            sorted = items.sorted { $0.isUnread != $1.isUnread ? ($0.isUnread && !$1.isUnread) : byTitle($0, $1) }
-        case .addedDate:
-            sorted = items.sorted { $0.addedDate != $1.addedDate ? $0.addedDate < $1.addedDate : byTitle($0, $1) }
-        case .lastReadDate:
-            sorted = items.sorted { ($0.lastReadDate ?? .distantPast) < ($1.lastReadDate ?? .distantPast) }
-        case .pages:
-            sorted = items.sorted { $0.pages != $1.pages ? $0.pages < $1.pages : byTitle($0, $1) }
-        }
-        return sortAscending ? sorted : sorted.reversed()
     }
 
     private func gridKeyboardStep(for width: CGFloat) -> Int {
         max(1, Int((width - 32) / 126))
-    }
-
-    private func currentEventIsShiftModified() -> Bool {
-        NSApp.currentEvent?.modifierFlags.contains(.shift) == true
     }
 
     private func isItemSelected(_ item: Item) -> Bool {
@@ -1980,11 +2136,10 @@ struct ContentView: View {
     /// the newly selected row/card visible.
     private func moveSelection(by delta: Int, extending: Bool = false) {
         guard !displayItems.isEmpty else { return }
-        if !mainContentHasFocus {
-            mainContentHasFocus = true
-        }
         let currentIndex = selectedDisplayIndex ?? displayItems.firstIndex { $0.id == selectedItemID } ?? -1
-        let newIndex = min(max(currentIndex + delta, 0), displayItems.count - 1)
+        guard let newIndex = LibraryKeyboardNavigation.destination(
+            from: currentIndex, by: delta, count: displayItems.count
+        ) else { return }
         let id = displayItems[newIndex].id
         selectedItemID = id
         selectedDisplayIndex = newIndex
@@ -1998,7 +2153,7 @@ struct ContentView: View {
         }
 
         lastKeyboardScrollIndex = newIndex
-        scrollPositionItemID = id
+        keyboardScrollTargetID = id
         prefetchNeighborCovers()
     }
 
@@ -2044,9 +2199,8 @@ struct ContentView: View {
             return
         }
         lastKeyboardScrollIndex = selectedDisplayIndex
-        selectedItemIDs = selectedItemIDs.filter { id in
-            displayItems.contains { $0.id == id }
-        }
+        let visibleIDs = Set(displayItems.map(\.id))
+        selectedItemIDs.formIntersection(visibleIDs)
         if selectedItemIDs.isEmpty {
             selectedItemIDs = [selectedItemID]
         }
@@ -2122,7 +2276,9 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             var onPrimaryClick: ((NSEvent.ModifierFlags) -> Void)?
             var onDoubleClick: (() -> Void)?
 
-            override var acceptsFirstResponder: Bool { true }
+            // Rows are recycled by the lazy layout; keyboard focus stays on
+            // the stable library container instead of a clicked row.
+            override var acceptsFirstResponder: Bool { false }
 
             override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
                 true
@@ -2226,32 +2382,56 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 }
             }
 
-            // 2. Register sequentially with progress in the status bar
-            dropQueueRemaining = urls.count
-            var lastAddedID: UUID? = nil
+            // Files may live on a slow NAS. Resolve their basic kind away from
+            // the UI actor before SwiftData registration begins.
+            let facts = await Task.detached(priority: .userInitiated) {
+                urls.map { url in
+                    var isDirectory: ObjCBool = false
+                    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                    return DroppedFileFact(url: url, exists: exists, isDirectory: isDirectory.boolValue)
+                }
+            }.value
 
-            for url in urls {
+            // 2. Register sequentially with progress in the status bar
+            dropQueueRemaining = facts.count
+            var lastAddedID: UUID? = nil
+            var itemsByPath = Dictionary(
+                allItems.map { ($0.relativePath, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            let knownVolumes = (try? modelContext.fetch(FetchDescriptor<Volume>())) ?? []
+            var volumesByPath = Dictionary(
+                knownVolumes.map { ($0.lastKnownPath, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+
+            for fact in facts {
                 defer { dropQueueRemaining -= 1 }
 
-                var isDir: ObjCBool = false
-                let fileExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-                guard fileExists, let kind = droppedFileKind(for: url, isDirectory: isDir.boolValue) else { continue }
+                let url = fact.url
+                guard fact.exists, let kind = droppedFileKind(for: url, isDirectory: fact.isDirectory) else { continue }
 
-                if let id = addDroppedFile(url: url, kind: kind, targetShelfID: targetShelfID) {
+                if let id = addDroppedFile(
+                    url: url,
+                    kind: kind,
+                    targetShelfID: targetShelfID,
+                    deferBookmarkSave: true,
+                    itemsByPath: &itemsByPath,
+                    volumesByPath: &volumesByPath
+                ) {
                     lastAddedID = id
                 }
                 // Yield so the UI (progress counter) stays responsive
                 await Task.yield()
             }
 
+            BookmarkVault.shared.savePendingChanges()
             try? modelContext.save()
             if let lastAddedID {
                 selectedItemID = lastAddedID
                 selectedItemIDs = [lastAddedID]
                 selectionAnchorItemID = lastAddedID
             }
-            displayItems = computeFilteredItems()
-            refreshSelectedDisplayIndex()
         }
     }
 
@@ -2280,15 +2460,25 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
     /// Registers a single dropped file. Returns the Item id if newly added.
     @discardableResult
-    private func addDroppedFile(url: URL, kind: DroppedFileKind, targetShelfID: UUID?) -> UUID? {
+    private func addDroppedFile(
+        url: URL,
+        kind: DroppedFileKind,
+        targetShelfID: UUID?,
+        deferBookmarkSave: Bool = false,
+        itemsByPath: inout [String: Item],
+        volumesByPath: inout [String: Volume]
+    ) -> UUID? {
         let (volumePath, volumeName, relativePath) = PathParser.split(url.path)
 
         // Prevent duplicate (Merge logic). Re-dropping an existing item also
         // repairs its access permission via a fresh security-scoped bookmark.
-        let fetchDescriptor = FetchDescriptor<Item>(predicate: #Predicate { $0.relativePath == relativePath })
-        if let existing = try? modelContext.fetch(fetchDescriptor).first {
+        if let existing = itemsByPath[relativePath] {
             if let refreshed = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
-                BookmarkVault.shared.setBookmark(refreshed, for: existing.id)
+                BookmarkVault.shared.setBookmark(
+                    refreshed,
+                    for: existing.id,
+                    saveImmediately: !deferBookmarkSave
+                )
             }
             addToStaticShelfIfNeeded(existing, shelfID: targetShelfID)
             if existing.pages == 0 {
@@ -2303,13 +2493,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
 
         // Find or create Volume
-        let volFetch = FetchDescriptor<Volume>(predicate: #Predicate { $0.lastKnownPath == volumePath })
         let volume: Volume
-        if let existingVol = try? modelContext.fetch(volFetch).first {
+        if let existingVol = volumesByPath[volumePath] {
             volume = existingVol
         } else {
             let newVol = Volume(name: volumeName, lastKnownPath: volumePath)
             modelContext.insert(newVol)
+            volumesByPath[volumePath] = newVol
             volume = newVol
         }
 
@@ -2341,8 +2531,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         )
 
         modelContext.insert(newItem)
+        itemsByPath[relativePath] = newItem
         if let itemBookmark {
-            BookmarkVault.shared.setBookmark(itemBookmark, for: itemID)
+            BookmarkVault.shared.setBookmark(
+                itemBookmark,
+                for: itemID,
+                saveImmediately: !deferBookmarkSave
+            )
         }
         addToStaticShelfIfNeeded(newItem, shelfID: targetShelfID)
         schedulePageCountRefreshIfNeeded(
@@ -2382,8 +2577,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             item.bookType = autoBookType
         }
         try? modelContext.save()
-        displayItems = computeFilteredItems()
-        refreshSelectedDisplayIndex()
     }
 
     /// A dropped file should be registered in the library and added to the
@@ -2523,6 +2716,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             let fileManager = FileManager.default
             var copied = 0
             var missing = 0
+            var copiedIDs: Set<UUID> = []
 
             for (index, pair) in pairs.enumerated() {
                 let source = root.appendingPathComponent("\(pair.legacyID)/thumbnail.jpg")
@@ -2533,6 +2727,7 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 } else if fileManager.fileExists(atPath: source.path) {
                     try? fileManager.copyItem(at: source, to: destination)
                     copied += 1
+                    copiedIDs.insert(pair.itemID)
                 } else {
                     missing += 1
                 }
@@ -2547,12 +2742,13 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
 
             let copiedCount = copied
             let missingCount = missing
+            let changedIDs = copiedIDs
+            await ThumbnailCache.shared.invalidate(itemIDs: changedIDs)
             await MainActor.run {
                 self.isImporting = false
                 self.importMessage = "サムネイル移行が完了しました。\n\n・コピーした画像: \(copiedCount)件\n・旧アセットが見つからない本: \(missingCount)件"
                 self.showImportResult = true
-                // Reload all visible covers
-                NotificationCenter.default.post(name: .coverDidChange, object: nil)
+                NotificationCenter.default.post(name: .coverDidChange, object: changedIDs)
             }
         }
     }
@@ -2611,13 +2807,14 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             // Items whose cover failed to load earlier in the session are
             // remembered as having none; clear that so the reload below picks up
             // what was just generated for them.
-            await ThumbnailCache.shared.invalidateMemoryCache()
+            let generatedIDs = Set(outcome.generated)
+            await ThumbnailCache.shared.invalidate(itemIDs: generatedIDs)
 
             isImporting = false
             processedBooks = totalBooks
             importMessage = "サムネイルの一括生成が完了しました。\n\n・対象外（処理済み・問題なし）: \(healthyThumbnails)件\n・未生成: \(scanResult.missingCount)件\n・モノクロ: \(scanResult.monochromeCount)件\n・横長（ゴミ画像疑い）: \(scanResult.landscapeCount)件\n・生成した画像: \(outcome.generated.count)件\n・使える表紙が無い: \(outcome.withoutCover.count)件\n・ファイルを開けず（未接続など）: \(outcome.unreachable.count)件"
             showImportResult = true
-            NotificationCenter.default.post(name: .coverDidChange, object: nil)
+            NotificationCenter.default.post(name: .coverDidChange, object: generatedIDs)
         }
     }
 
@@ -2815,8 +3012,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         shelf.items = (shelf.items ?? []).filter { !ids.contains($0.id) }
         clearSelection(afterRemoving: ids)
         try? modelContext.save()
-        displayItems = computeFilteredItems()
-        refreshSelectedDisplayIndex()
     }
 
     private func deleteItemsFromLibrary(_ items: [Item]) {
@@ -2826,8 +3021,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         }
         clearSelection(afterRemoving: ids)
         try? modelContext.save()
-        displayItems = computeFilteredItems()
-        refreshSelectedDisplayIndex()
     }
 
     private func clearSelection(afterRemoving removedIDs: Set<UUID>) {
@@ -2843,19 +3036,40 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     /// Deletes an item from the library. When trashFile is true the actual
     /// file is also moved to the Trash.
     private func deleteItem(_ item: Item, trashFile: Bool) {
-        if trashFile, let resolved = ItemFileAccess.resolve(item: item) {
-            do {
-                try FileManager.default.trashItem(at: resolved.url, resultingItemURL: nil)
-            } catch {
-                openErrorMessage = "ファイルをゴミ箱に移動できませんでした。\n\n\(error.localizedDescription)"
-            }
-            resolved.release()
+        guard trashFile else {
+            deleteItemModel(item)
+            return
         }
+
+        guard let resolved = ItemFileAccess.resolve(item: item) else {
+            showMissingFileAlert = true
+            return
+        }
+        isPerformingFileOperation = true
+        let fileURL = resolved.url
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    try FileManager.default.trashItem(at: fileURL, resultingItemURL: nil)
+                    return FileOperationOutcome.success
+                } catch {
+                    return FileOperationOutcome.failure(error)
+                }
+            }.value
+            resolved.release()
+            isPerformingFileOperation = false
+            guard outcome.succeeded else {
+                openErrorMessage = "ファイルをゴミ箱に移動できませんでした。\n\n\(outcome.errorDescription ?? "不明なエラー")"
+                return
+            }
+            deleteItemModel(item)
+        }
+    }
+
+    private func deleteItemModel(_ item: Item) {
         clearSelection(afterRemoving: [item.id])
         modelContext.delete(item)
         try? modelContext.save()
-        displayItems = computeFilteredItems()
-        refreshSelectedDisplayIndex()
     }
 
     /// Moves the item's file into a user-selected folder, updating its
@@ -2866,7 +3080,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             return
         }
         let sourceURL = resolved.url
-        defer { resolved.release() }
 
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -2875,16 +3088,32 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
         panel.title = "移動先フォルダを選択"
         panel.prompt = "ここへ移動"
 
-        guard panel.runModal() == .OK, let destDir = panel.url else { return }
+        guard panel.runModal() == .OK, let destDir = panel.url else {
+            resolved.release()
+            return
+        }
         let scoped = destDir.startAccessingSecurityScopedResource()
-        defer { if scoped { destDir.stopAccessingSecurityScopedResource() } }
 
         let destURL = destDir.appendingPathComponent(sourceURL.lastPathComponent)
-        do {
-            try FileManager.default.moveItem(at: sourceURL, to: destURL)
+        isPerformingFileOperation = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    try FileManager.default.moveItem(at: sourceURL, to: destURL)
+                    return FileOperationOutcome.success
+                } catch {
+                    return FileOperationOutcome.failure(error)
+                }
+            }.value
+            resolved.release()
+            isPerformingFileOperation = false
+            guard outcome.succeeded else {
+                if scoped { destDir.stopAccessingSecurityScopedResource() }
+                openErrorMessage = "ファイルを移動できませんでした。\n\n\(outcome.errorDescription ?? "不明なエラー")"
+                return
+            }
             updateItemLocation(item, to: destURL)
-        } catch {
-            openErrorMessage = "ファイルを移動できませんでした。\n\n\(error.localizedDescription)"
+            if scoped { destDir.stopAccessingSecurityScopedResource() }
         }
     }
 
@@ -2895,7 +3124,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             return
         }
         let sourceURL = resolved.url
-        defer { resolved.release() }
 
         let currentName = sourceURL.lastPathComponent
         guard let newName = promptForText(
@@ -2903,15 +3131,29 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
             message: "新しいファイル名を入力してください。",
             defaultValue: currentName
         )?.trimmingCharacters(in: .whitespaces), !newName.isEmpty, newName != currentName else {
+            resolved.release()
             return
         }
 
         let destURL = sourceURL.deletingLastPathComponent().appendingPathComponent(newName)
-        do {
-            try FileManager.default.moveItem(at: sourceURL, to: destURL)
+        isPerformingFileOperation = true
+        Task {
+            let outcome = await Task.detached(priority: .userInitiated) {
+                do {
+                    try FileManager.default.moveItem(at: sourceURL, to: destURL)
+                    return FileOperationOutcome.success
+                } catch {
+                    return FileOperationOutcome.failure(error)
+                }
+            }.value
+            isPerformingFileOperation = false
+            guard outcome.succeeded else {
+                resolved.release()
+                openErrorMessage = "ファイル名を変更できませんでした。\n\n\(outcome.errorDescription ?? "不明なエラー")"
+                return
+            }
             updateItemLocation(item, to: destURL)
-        } catch {
-            openErrorMessage = "ファイル名を変更できませんでした。\n\n\(error.localizedDescription)"
+            resolved.release()
         }
     }
 
@@ -2974,15 +3216,6 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     }
 
     // MARK: - App Actions
-    private func deleteSelectedItem() {
-        guard let item = selectedItem else { return }
-        modelContext.delete(item)
-        try? modelContext.save()
-        selectedItemID = nil
-        selectedItemIDs.removeAll()
-        selectionAnchorItemID = nil
-    }
-
     private func deleteShelf(_ shelf: Shelf) {
         let type = shelf.type
         if case .shelf(let id) = sidebarSelection, id == shelf.id {

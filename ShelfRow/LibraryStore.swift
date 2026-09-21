@@ -6,6 +6,7 @@
 import AppKit
 import Foundation
 import OSLog
+import SQLite3
 import SwiftData
 
 /// How the library store is open.
@@ -58,6 +59,8 @@ final class LibraryStore {
         /// Set when this device is to be re-seeded from iCloud. Acted on at the
         /// next launch, before any store is open.
         static let pendingLibraryReset = "libraryPendingResetFromCloud"
+        /// The replacement flow completed its backup before relaunch.
+        static let pendingResetBackupReady = "libraryPendingResetBackupReady"
         /// Set when iCloud's copy is to be deleted. Acted on at the next launch,
         /// once the library is open without CloudKit attached to it.
         static let pendingCloudPurge = "libraryPendingCloudPurge"
@@ -101,7 +104,10 @@ final class LibraryStore {
     /// costs the person's data a needless open on every run, and the two
     /// coordinators fight badly enough to take the test host down.
     private static var isRunningTests: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--keyboard-navigation-test") { return true }
+        #endif
+        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 
     init() {
@@ -109,17 +115,29 @@ final class LibraryStore {
             let schema = Schema(Self.libraryModels + Self.localModels)
             guard let scratch = try? ModelContainer(
                 for: schema,
-                configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+                configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)
             ) else {
                 fatalError("Could not open an in-memory library for testing")
             }
             container = scratch
             mode = .local
             syncEnabled = false
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--keyboard-navigation-test") {
+                let count = ProcessInfo.processInfo.arguments.contains("--large-library-test") ? 20_000 : 36
+                for number in 0..<count {
+                    let item = Item(relativePath: "keyboard-fixture-\(number).zip", title: String(format: "Keyboard row %02d", number), author: "")
+                    scratch.mainContext.insert(item)
+                }
+                do {
+                    try scratch.mainContext.save()
+                } catch {
+                    Self.logger.error("Could not seed keyboard test library: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            #endif
             return
         }
-
-        StoreFileBackup.rotateStartupBackup()
 
         // Discarding this device's library has to happen with nothing holding the
         // files open, which only the moment before the first container exists can
@@ -127,9 +145,21 @@ final class LibraryStore {
         // empty the library everywhere.
         if UserDefaults.standard.bool(forKey: DefaultsKey.pendingLibraryReset) {
             Self.waitForOtherInstancesToExit()
-            StoreFileBackup.removeStoreFiles()
-            UserDefaults.standard.set(false, forKey: DefaultsKey.pendingLibraryReset)
-            Self.logger.info("Cleared this device's library; it will be refilled from iCloud")
+            let backupReady = UserDefaults.standard.bool(forKey: DefaultsKey.pendingResetBackupReady)
+                || StoreFileBackup.snapshotBeforeModeSwitch()
+            if backupReady {
+                StoreFileBackup.removeStoreFiles()
+                UserDefaults.standard.set(false, forKey: DefaultsKey.pendingLibraryReset)
+                UserDefaults.standard.set(false, forKey: DefaultsKey.pendingResetBackupReady)
+                Self.logger.info("Cleared this device's library; it will be refilled from iCloud")
+            } else {
+                // Keep both the store and the pending request intact. Opening
+                // this local data through CloudKit now could merge the two
+                // libraries, which is precisely what this flow must avoid.
+                UserDefaults.standard.set(LibraryMode.local.rawValue, forKey: DefaultsKey.lastMode)
+                lastFailureMessage = "切り替え前のバックアップを作成できなかったため、ローカルの蔵書を保持しました。"
+                Self.logger.error("Did not replace the local library because its backup failed")
+            }
         }
 
         syncEnabled = UserDefaults.standard.bool(forKey: DefaultsKey.syncEnabled)
@@ -155,6 +185,7 @@ final class LibraryStore {
         Self.logger.info("Opened the library in \(self.mode.rawValue, privacy: .public) mode")
         BookmarkVault.shared.attach(to: container)
         BookmarkVault.shared.adoptBookmarksStoredOnModels()
+        StoreFileBackup.scheduleStartupBackup()
     }
 
     /// Waits for the instance being replaced to finish quitting.
@@ -207,22 +238,37 @@ final class LibraryStore {
     /// Turns syncing on with this device's library as the one that fills iCloud.
     /// Right for the first device; on any later one it would upload a second copy
     /// of books iCloud already holds, since nothing merges them.
-    func enableSyncSeedingCloud() {
-        StoreFileBackup.snapshotBeforeModeSwitch()
+    func enableSyncSeedingCloud() async -> Bool {
+        guard await prepareModeSwitchBackup() else { return false }
         syncEnabled = true
         recordRole(.primary)
         persistRequestedMode(.cloud)
+        return true
     }
 
     /// Turns syncing on by throwing this device's library away and taking
     /// iCloud's. Right for every device after the first. The deletion itself
     /// happens at the next launch (see `init`).
-    func enableSyncReplacingLocalLibrary() {
-        StoreFileBackup.snapshotBeforeModeSwitch()
+    func enableSyncReplacingLocalLibrary() async -> Bool {
+        guard await prepareModeSwitchBackup() else { return false }
         syncEnabled = true
         UserDefaults.standard.set(true, forKey: DefaultsKey.pendingLibraryReset)
+        UserDefaults.standard.set(true, forKey: DefaultsKey.pendingResetBackupReady)
         recordRole(.replica)
         persistRequestedMode(.cloud)
+        return true
+    }
+
+    private func prepareModeSwitchBackup() async -> Bool {
+        blockingTask = "切り替え前のバックアップ"
+        let succeeded = await Task.detached(priority: .utility) {
+            StoreFileBackup.snapshotBeforeModeSwitch()
+        }.value
+        blockingTask = nil
+        if !succeeded {
+            lastFailureMessage = "切り替え前のバックアップを作成できなかったため、iCloud設定を変更しませんでした。"
+        }
+        return succeeded
     }
 
     private func recordRole(_ role: CloudRole?) {
@@ -301,11 +347,11 @@ final class LibraryStore {
     }
 
     /// What iCloud mirrors.
-    static let libraryModels: [any PersistentModel.Type] =
+    nonisolated static let libraryModels: [any PersistentModel.Type] =
         [Volume.self, Item.self, Shelf.self, CoverExtractionRecord.self]
 
     /// What stays on this device: access to files, and which covers it holds.
-    static let localModels: [any PersistentModel.Type] =
+    nonisolated static let localModels: [any PersistentModel.Type] =
         [LocalBookmark.self, LocalCoverState.self]
 
     /// Named in one place on purpose. A model listed in a configuration's schema
@@ -340,20 +386,21 @@ final class LibraryStore {
 
 // MARK: - Store file copies
 
-/// Copies of the store files taken where losing them would be unrecoverable:
-/// a rotating three deep at every launch, and one more before iCloud is first
-/// allowed to touch the library.
-enum StoreFileBackup {
+/// Transactional store snapshots taken where losing data would be unrecoverable:
+/// a delayed, daily rotating set and one more before the iCloud mode changes.
+nonisolated enum StoreFileBackup {
     static let libraryStoreName = "default.store"
     static let localStoreName = "local.store"
 
     private static let maxGenerations = 3
+    private static let minimumStartupBackupInterval: TimeInterval = 24 * 60 * 60
     private static let startupBackupDirName = "StartupBackups"
     private static let modeSwitchBackupDirName = "ModeSwitchBackups"
+    private static let logger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "StoreBackup")
 
     /// Every file SQLite keeps for a store — the WAL and shared-memory files hold
     /// writes that have not been checkpointed, so a copy without them is torn.
-    private static var storeFileNames: [String] {
+    private static var storeArtifactNames: [String] {
         [libraryStoreName, localStoreName].flatMap { [$0, "\($0)-wal", "\($0)-shm"] }
     }
 
@@ -363,53 +410,172 @@ enum StoreFileBackup {
         return directory
     }
 
-    /// gen0 is newest, gen2 oldest. Failures are swallowed: a missing backup must
-    /// never keep the app from starting.
-    static func rotateStartupBackup() {
+    /// A SQLite backup reads a transactionally consistent snapshot from the live
+    /// store, including committed WAL contents, so it can run after the window is
+    /// available without copying a potentially gigabyte-sized WAL beside the DB.
+    /// It is deliberately delayed and limited to once per day: launch should not
+    /// compete with the first list render or thumbnail reconciliation.
+    static func scheduleStartupBackup() {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            createStartupBackupIfNeeded()
+        }
+    }
+
+    nonisolated static func needsStartupBackup(
+        lastBackupDate: Date?,
+        now: Date = Date(),
+        minimumInterval: TimeInterval = minimumStartupBackupInterval
+    ) -> Bool {
+        guard let lastBackupDate else { return true }
+        return now.timeIntervalSince(lastBackupDate) >= minimumInterval
+    }
+
+    /// gen0 is newest, gen2 oldest. A new generation is only rotated into place
+    /// after both database snapshots have completed successfully.
+    private static func createStartupBackupIfNeeded() {
         guard let directory = try? storeDirectory() else { return }
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: directory.appendingPathComponent(libraryStoreName).path) else { return }
 
         let backupRoot = directory.appendingPathComponent(startupBackupDirName, isDirectory: true)
-        try? fileManager.removeItem(at: backupRoot.appendingPathComponent("gen\(maxGenerations - 1)"))
-        for generation in stride(from: maxGenerations - 2, through: 0, by: -1) {
-            let source = backupRoot.appendingPathComponent("gen\(generation)")
-            guard fileManager.fileExists(atPath: source.path) else { continue }
-            try? fileManager.moveItem(at: source, to: backupRoot.appendingPathComponent("gen\(generation + 1)"))
+        let newest = backupRoot.appendingPathComponent("gen0", isDirectory: true)
+        let hasLegacyCopies = (0..<maxGenerations).contains { generation in
+            let copy = backupRoot.appendingPathComponent("gen\(generation)", isDirectory: true)
+            return ["\(libraryStoreName)-wal", "\(libraryStoreName)-shm",
+                    "\(localStoreName)-wal", "\(localStoreName)-shm"].contains {
+                fileManager.fileExists(atPath: copy.appendingPathComponent($0).path)
+            }
+        }
+        let lastBackupDate = (try? fileManager.attributesOfItem(
+            atPath: newest.appendingPathComponent("backup_date.txt").path
+        )[.modificationDate]) as? Date
+        guard hasLegacyCopies || needsStartupBackup(lastBackupDate: lastBackupDate) else { return }
+
+        let staging = backupRoot.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try snapshotDatabases(from: directory, to: staging)
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            logger.error("Could not create the scheduled store backup: \(error.localizedDescription, privacy: .public)")
+            return
         }
 
-        copyStoreFiles(from: directory, to: backupRoot.appendingPathComponent("gen0"))
+        if hasLegacyCopies {
+            // The former format copied WAL/SHM files verbatim and could consume
+            // more than a gigabyte. Once a valid SQLite snapshot exists, retire
+            // those generations as a unit rather than leaving torn databases.
+            for generation in 0..<maxGenerations {
+                try? fileManager.removeItem(at: backupRoot.appendingPathComponent("gen\(generation)"))
+            }
+        } else {
+            try? fileManager.removeItem(at: backupRoot.appendingPathComponent("gen\(maxGenerations - 1)"))
+            for generation in stride(from: maxGenerations - 2, through: 0, by: -1) {
+                let source = backupRoot.appendingPathComponent("gen\(generation)")
+                guard fileManager.fileExists(atPath: source.path) else { continue }
+                try? fileManager.moveItem(at: source, to: backupRoot.appendingPathComponent("gen\(generation + 1)"))
+            }
+        }
+        do {
+            try fileManager.moveItem(at: staging, to: newest)
+            logger.info("Created the scheduled SQLite store backup")
+        } catch {
+            logger.error("Could not install the scheduled store backup: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Deletes both stores. Only safe with no container open — see
     /// `LibraryStore.init`. The snapshot taken beforehand is the way back.
     static func removeStoreFiles() {
         guard let directory = try? storeDirectory() else { return }
-        for name in storeFileNames {
+        for name in storeArtifactNames {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
 
-    static func snapshotBeforeModeSwitch() {
-        guard let directory = try? storeDirectory() else { return }
+    @discardableResult
+    static func snapshotBeforeModeSwitch() -> Bool {
+        guard let directory = try? storeDirectory() else { return false }
         let destination = directory.appendingPathComponent(modeSwitchBackupDirName, isDirectory: true)
-        try? FileManager.default.removeItem(at: destination)
-        copyStoreFiles(from: directory, to: destination)
+        let staging = directory.appendingPathComponent(".mode-switch-backup-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try snapshotDatabases(from: directory, to: staging)
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: staging, to: destination)
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            logger.error("Could not create the mode-switch store backup: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
-    private static func copyStoreFiles(from directory: URL, to destination: URL) {
+    private static func snapshotDatabases(from directory: URL, to destination: URL) throws {
         let fileManager = FileManager.default
-        do {
-            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-            for name in storeFileNames {
-                let source = directory.appendingPathComponent(name)
-                guard fileManager.fileExists(atPath: source.path) else { continue }
-                try fileManager.copyItem(at: source, to: destination.appendingPathComponent(name))
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        for name in [libraryStoreName, localStoreName] {
+            let source = directory.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            try snapshotDatabase(from: source, to: destination.appendingPathComponent(name))
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        try stamp.write(to: destination.appendingPathComponent("backup_date.txt"), atomically: true, encoding: .utf8)
+    }
+
+    private static func snapshotDatabase(from source: URL, to destination: URL) throws {
+        var sourceDatabase: OpaquePointer?
+        var destinationDatabase: OpaquePointer?
+        guard sqlite3_open_v2(source.path, &sourceDatabase, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            defer { sqlite3_close(sourceDatabase) }
+            throw StoreBackupError.cannotOpenSource(source.lastPathComponent)
+        }
+        defer { sqlite3_close(sourceDatabase) }
+
+        try? FileManager.default.removeItem(at: destination)
+        guard sqlite3_open_v2(
+            destination.path,
+            &destinationDatabase,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK else {
+            defer { sqlite3_close(destinationDatabase) }
+            throw StoreBackupError.cannotOpenDestination(destination.lastPathComponent)
+        }
+        defer { sqlite3_close(destinationDatabase) }
+
+        guard let backup = sqlite3_backup_init(destinationDatabase, "main", sourceDatabase, "main") else {
+            throw StoreBackupError.cannotStart(source.lastPathComponent)
+        }
+        defer { sqlite3_backup_finish(backup) }
+
+        while true {
+            switch sqlite3_backup_step(backup, 512) {
+            case SQLITE_DONE:
+                return
+            case SQLITE_OK:
+                continue
+            case SQLITE_BUSY, SQLITE_LOCKED:
+                sqlite3_sleep(10)
+            default:
+                throw StoreBackupError.copyFailed(source.lastPathComponent)
             }
-            let stamp = ISO8601DateFormatter().string(from: Date())
-            try stamp.write(to: destination.appendingPathComponent("backup_date.txt"), atomically: true, encoding: .utf8)
-        } catch {
-            // Never block startup or a mode switch because a copy failed.
+        }
+    }
+}
+
+nonisolated private enum StoreBackupError: LocalizedError {
+    case cannotOpenSource(String)
+    case cannotOpenDestination(String)
+    case cannotStart(String)
+    case copyFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cannotOpenSource(let name): return "\(name)を読み取り用に開けませんでした。"
+        case .cannotOpenDestination(let name): return "\(name)のバックアップを作成できませんでした。"
+        case .cannotStart(let name): return "\(name)のSQLiteバックアップを開始できませんでした。"
+        case .copyFailed(let name): return "\(name)のSQLiteバックアップ中にエラーが発生しました。"
         }
     }
 }

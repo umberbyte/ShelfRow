@@ -46,7 +46,7 @@ final class CoverExtractionRecord {
 }
 
 /// What one bulk run concluded, ready to be written back as records.
-struct CoverExtractionOutcomes: Sendable {
+nonisolated struct CoverExtractionOutcomes: Sendable {
     var generated: [UUID] = []
     var withoutCover: [UUID] = []
     var unreachable: [UUID] = []

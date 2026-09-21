@@ -12,6 +12,12 @@ struct CoverImageView: View {
     @State private var image: NSImage? = nil
     @State private var showsPreviousCover = false
     @State private var isLoading = false
+    @State private var reloadGeneration = 0
+
+    private struct LoadID: Equatable {
+        let itemID: UUID
+        let generation: Int
+    }
 
     var body: some View {
         ZStack {
@@ -55,22 +61,21 @@ struct CoverImageView: View {
                     .shadow(radius: 2)
             }
         }
-        .task(id: item.id) {
+        .task(id: LoadID(itemID: item.id, generation: reloadGeneration)) {
+            if reloadGeneration > 0 {
+                await ThumbnailCache.shared.invalidateFailure(forItemID: item.id)
+            }
+            guard !Task.isCancelled else { return }
             await loadImage()
         }
         // Reload when the cover is replaced (表紙を編集) or after bulk
         // thumbnail migration (object == nil means "all covers changed").
         .onReceive(NotificationCenter.default.publisher(for: .coverDidChange)) { notification in
-            if (notification.object as? UUID) == item.id {
-                Task {
-                    await ThumbnailCache.shared.invalidateFailure(forItemID: item.id)
-                    await loadImage()
-                }
-            } else if notification.object == nil, image == nil {
-                Task {
-                    await ThumbnailCache.shared.invalidateFailure(forItemID: nil)
-                    await loadImage()
-                }
+            let changedIDs = notification.object as? Set<UUID>
+            if (notification.object as? UUID) == item.id
+                || changedIDs?.contains(item.id) == true
+                || notification.object == nil {
+                reloadGeneration &+= 1
             }
         }
     }

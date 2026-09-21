@@ -8,7 +8,7 @@ import OSLog
 import SwiftData
 
 /// What this device has to send or fetch, and what it has already.
-struct CoverDistributionCounts: Sendable, Equatable {
+nonisolated struct CoverDistributionCounts: Sendable, Equatable {
     /// Thumbnails this device holds at the version the library asks for.
     var held: Int = 0
     /// Thumbnails to fetch from the distribution folder.
@@ -20,7 +20,7 @@ struct CoverDistributionCounts: Sendable, Equatable {
 }
 
 /// One thumbnail to fetch.
-struct CoverFetchTarget: Sendable, Equatable {
+nonisolated struct CoverFetchTarget: Sendable, Equatable {
     let itemID: UUID
     /// The version the library says is current; recorded once the file is here.
     let version: Int
@@ -29,14 +29,44 @@ struct CoverFetchTarget: Sendable, Equatable {
 }
 
 /// One thumbnail to hand to the distribution folder.
-struct CoverUploadTarget: Sendable, Equatable {
+nonisolated struct CoverUploadTarget: Sendable, Equatable {
     let itemID: UUID
     /// The version to record once the folder has it.
     let version: Int
 }
 
+/// One reconciliation pass over the local cache and bookkeeping. The coordinator
+/// can carry these targets directly into a quiet transfer, avoiding a second full
+/// directory enumeration immediately after deciding that work exists.
+nonisolated struct CoverAutomaticPlan: Sendable, Equatable {
+    var uploads: [CoverUploadTarget]
+    var fetches: [CoverFetchTarget]
+    var adopted: Int
+    var removedOrphans: Int
+}
+
+/// Decides whether a local cover has to be written to the distribution folder.
+///
+/// A matching manifest entry normally means there is nothing to do. A previous
+/// read failure is the exception: it proves that the manifest can outlive the
+/// file it describes, so the first device must be able to put that file back
+/// without manufacturing a new cover version.
+nonisolated enum CoverUploadDecision {
+    nonisolated static func version(
+        manifestEntry: ThumbnailDistribution.Manifest.Entry?,
+        localBytes: Int,
+        lastErrorCode: Int
+    ) -> Int? {
+        guard localBytes > 0 else { return nil }
+        guard let manifestEntry else { return 1 }
+        if manifestEntry.bytes != localBytes { return manifestEntry.version + 1 }
+        if lastErrorCode != 0 { return manifestEntry.version }
+        return nil
+    }
+}
+
 /// The result of moving one file, on the way back to the store.
-struct CoverFetchResult: Sendable {
+nonisolated struct CoverFetchResult: Sendable {
     let itemID: UUID
     let version: Int
     let bytes: Int
@@ -62,10 +92,6 @@ actor CoverDistributionStore {
         )
     }
 
-    private func cacheFileURL(_ itemID: UUID) -> URL {
-        ThumbnailCache.diskCacheDirectory.appendingPathComponent("\(itemID.uuidString).jpg")
-    }
-
     /// Every thumbnail on disk and its size, from one directory listing.
     ///
     /// Asking the file system about each book in turn is twenty thousand system
@@ -88,19 +114,59 @@ actor CoverDistributionStore {
         return inventory
     }
 
-    /// The parts of a book this bookkeeping needs, without materialising the rest
-    /// of it. A library-sized fetch of whole records is most of the cost here.
-    private struct CoverFacts {
-        let id: UUID
-        let coverVersion: Int
-        let coverBytes: Int
+    /// Only identity is needed for distribution. Avoid materialising all model
+    /// fields while reconciling a library-sized cache.
+    private func libraryItemIDs() throws -> Set<UUID> {
+        var descriptor = FetchDescriptor<Item>()
+        descriptor.propertiesToFetch = [\.id]
+        return Set(try modelContext.fetch(descriptor).map(\.id))
     }
 
-    private func coverFacts() throws -> [CoverFacts] {
-        var descriptor = FetchDescriptor<Item>()
-        descriptor.propertiesToFetch = [\.id, \.coverVersion, \.coverBytes]
-        return try modelContext.fetch(descriptor).map {
-            CoverFacts(id: $0.id, coverVersion: $0.coverVersion, coverBytes: $0.coverBytes)
+    private struct Snapshot {
+        var states: [UUID: LocalCoverState]
+        let inventory: [UUID: Int]
+        let liveItemIDs: Set<UUID>
+    }
+
+    private func snapshot() throws -> Snapshot {
+        try Snapshot(
+            states: statesByItemID(),
+            inventory: Self.cacheInventory(),
+            liveItemIDs: libraryItemIDs()
+        )
+    }
+
+    private func fetchTargets(
+        manifest: ThumbnailDistribution.Manifest,
+        snapshot: Snapshot
+    ) -> [CoverFetchTarget] {
+        manifest.entries.compactMap { key, entry in
+            guard let itemID = UUID(uuidString: key), snapshot.liveItemIDs.contains(itemID) else { return nil }
+            let state = snapshot.states[itemID]
+
+            if let state, state.attempts >= Self.maxAttempts, state.version < entry.version,
+               state.lastErrorCode != 0 {
+                return nil
+            }
+
+            let hasCurrentVersion = state?.version == entry.version
+            guard !hasCurrentVersion || snapshot.inventory[itemID] == nil else { return nil }
+            return CoverFetchTarget(itemID: itemID, version: entry.version, expectedBytes: entry.bytes)
+        }
+    }
+
+    private func uploadTargets(
+        manifest: ThumbnailDistribution.Manifest,
+        snapshot: Snapshot
+    ) -> [CoverUploadTarget] {
+        snapshot.inventory.compactMap { itemID, bytes in
+            guard snapshot.liveItemIDs.contains(itemID), bytes > 0 else { return nil }
+            guard let version = CoverUploadDecision.version(
+                manifestEntry: manifest.entry(for: itemID),
+                localBytes: bytes,
+                lastErrorCode: snapshot.states[itemID]?.lastErrorCode ?? 0
+            ) else { return nil }
+            return CoverUploadTarget(itemID: itemID, version: version)
         }
     }
 
@@ -110,28 +176,7 @@ actor CoverDistributionStore {
     /// says what it holds. Nothing here reads `Item.coverVersion`, which is what
     /// keeps a library-sized registration out of iCloud entirely.
     func fetchTargets(manifest: ThumbnailDistribution.Manifest) throws -> [CoverFetchTarget] {
-        let states = try statesByItemID()
-        let inventory = Self.cacheInventory()
-        // Only books this library actually has. The folder may carry covers for
-        // ones this device has since deleted.
-        let mine = Set(try coverFacts().map(\.id))
-
-        return manifest.entries.compactMap { key, entry in
-            guard let itemID = UUID(uuidString: key), mine.contains(itemID) else { return nil }
-            let state = states[itemID]
-
-            // A version this device has already tried three times is left alone
-            // until the folder moves on to a new one.
-            if let state, state.attempts >= Self.maxAttempts, state.version < entry.version,
-               state.lastErrorCode != 0 {
-                return nil
-            }
-
-            let hasCurrentVersion = state?.version == entry.version
-            guard !hasCurrentVersion || inventory[itemID] == nil else { return nil }
-
-            return CoverFetchTarget(itemID: itemID, version: entry.version, expectedBytes: entry.bytes)
-        }
+        fetchTargets(manifest: manifest, snapshot: try snapshot())
     }
 
     /// The thumbnails this device has that the folder does not, or holds an older
@@ -140,36 +185,31 @@ actor CoverDistributionStore {
     /// A cover is the same cover while its size is: the files are written once
     /// from one rendering, so a differing size means this device has re-picked it.
     func uploadTargets(manifest: ThumbnailDistribution.Manifest) throws -> [CoverUploadTarget] {
-        let inventory = Self.cacheInventory()
-        let mine = Set(try coverFacts().map(\.id))
-
-        return inventory.compactMap { itemID, bytes in
-            guard mine.contains(itemID), bytes > 0 else { return nil }
-
-            guard let entry = manifest.entry(for: itemID) else {
-                return CoverUploadTarget(itemID: itemID, version: 1)
-            }
-            guard entry.bytes != bytes else { return nil }
-            return CoverUploadTarget(itemID: itemID, version: entry.version + 1)
-        }
+        uploadTargets(manifest: manifest, snapshot: try snapshot())
     }
 
     func counts(manifest: ThumbnailDistribution.Manifest) throws -> CoverDistributionCounts {
-        let states = try statesByItemID()
-        let inventory = Self.cacheInventory()
+        let snapshot = try snapshot()
         var counts = CoverDistributionCounts()
 
-        for itemID in try coverFacts().map(\.id) {
-            let bytes = inventory[itemID]
+        for itemID in snapshot.liveItemIDs {
+            let bytes = snapshot.inventory[itemID]
             guard let entry = manifest.entry(for: itemID) else {
                 // Here but not in the folder: something for this device to hand over.
                 if bytes != nil { counts.toUpload += 1 }
                 continue
             }
 
-            if let bytes, bytes != entry.bytes { counts.toUpload += 1 }
+            let state = snapshot.states[itemID]
+            if let bytes,
+               CoverUploadDecision.version(
+                   manifestEntry: entry,
+                   localBytes: bytes,
+                   lastErrorCode: state?.lastErrorCode ?? 0
+               ) != nil {
+                counts.toUpload += 1
+            }
 
-            let state = states[itemID]
             if state?.version == entry.version, bytes != nil {
                 counts.held += 1
             } else if let state, state.attempts >= Self.maxAttempts, state.lastErrorCode != 0 {
@@ -179,6 +219,61 @@ actor CoverDistributionStore {
             }
         }
         return counts
+    }
+
+    /// Adopts, prunes and plans transfers from one cache inventory and one pair of
+    /// database fetches. The launch path previously repeated all three operations
+    /// for each question it asked.
+    func automaticPlan(manifest: ThumbnailDistribution.Manifest) throws -> CoverAutomaticPlan {
+        var snapshot = try snapshot()
+        var adopted = 0
+        var removed = 0
+
+        for (itemID, entry) in manifest.entries.compactMap({ key, entry -> (UUID, ThumbnailDistribution.Manifest.Entry)? in
+            guard let itemID = UUID(uuidString: key) else { return nil }
+            return (itemID, entry)
+        }) {
+            guard snapshot.states[itemID]?.version != entry.version else { continue }
+            guard let bytes = snapshot.inventory[itemID], bytes > 0, bytes == entry.bytes else { continue }
+
+            let state: LocalCoverState
+            if let existing = snapshot.states[itemID] {
+                state = existing
+            } else {
+                let fresh = LocalCoverState(itemID: itemID)
+                modelContext.insert(fresh)
+                snapshot.states[itemID] = fresh
+                state = fresh
+            }
+            state.version = entry.version
+            state.bytes = bytes
+            if state.lastErrorCode == 0 { state.attempts = 0 }
+            state.updatedAt = Date()
+            adopted += 1
+        }
+
+        for itemID in Array(snapshot.states.keys) where !snapshot.liveItemIDs.contains(itemID) {
+            guard let state = snapshot.states.removeValue(forKey: itemID) else { continue }
+            modelContext.delete(state)
+            removed += 1
+        }
+
+        if adopted > 0 || removed > 0 {
+            try modelContext.save()
+        }
+        if adopted > 0 {
+            Self.logger.info("Adopted \(adopted, privacy: .public) thumbnails already in the cache")
+        }
+        if removed > 0 {
+            Self.logger.info("Forgot \(removed, privacy: .public) cover records for books that are gone")
+        }
+
+        return CoverAutomaticPlan(
+            uploads: uploadTargets(manifest: manifest, snapshot: snapshot),
+            fetches: fetchTargets(manifest: manifest, snapshot: snapshot),
+            adopted: adopted,
+            removedOrphans: removed
+        )
     }
 
     /// How many rows are written before a save. A library-sized run held in one
@@ -279,26 +374,30 @@ actor CoverDistributionStore {
     @discardableResult
     func adoptLocalFiles(manifest: ThumbnailDistribution.Manifest) -> Int {
         do {
-            let states = try statesByItemID()
-            let inventory = Self.cacheInventory()
+            var snapshot = try snapshot()
             var adopted = 0
 
             for (itemID, entry) in manifest.entries.compactMap({ key, entry -> (UUID, ThumbnailDistribution.Manifest.Entry)? in
                 guard let itemID = UUID(uuidString: key) else { return nil }
                 return (itemID, entry)
             }) {
-                guard states[itemID]?.version != entry.version else { continue }
-                guard let bytes = inventory[itemID], bytes > 0, bytes == entry.bytes else { continue }
+                guard snapshot.states[itemID]?.version != entry.version else { continue }
+                guard let bytes = snapshot.inventory[itemID], bytes > 0, bytes == entry.bytes else { continue }
 
-                let state = states[itemID] ?? {
+                let state = snapshot.states[itemID] ?? {
                     let fresh = LocalCoverState(itemID: itemID)
                     modelContext.insert(fresh)
+                    snapshot.states[itemID] = fresh
                     return fresh
                 }()
                 state.version = entry.version
                 state.bytes = bytes
-                state.attempts = 0
-                state.lastErrorCode = 0
+                // A local file satisfies this device, but a previous read error
+                // still proves that the folder's manifest may point at a missing
+                // file. Preserve that evidence until `recordUploaded` repairs it.
+                if state.lastErrorCode == 0 {
+                    state.attempts = 0
+                }
                 state.updatedAt = Date()
                 adopted += 1
             }
@@ -317,7 +416,7 @@ actor CoverDistributionStore {
     /// library it describes.
     func forgetOrphanedStates() {
         do {
-            let live = Set(try coverFacts().map(\.id))
+            let live = try libraryItemIDs()
             var removed = 0
             for state in try modelContext.fetch(FetchDescriptor<LocalCoverState>()) where !live.contains(state.itemID) {
                 modelContext.delete(state)
@@ -337,7 +436,7 @@ actor CoverDistributionStore {
 /// File work only, and deliberately outside the store's actor: a serialized actor
 /// would copy one file at a time, and these transfers are latency-bound on a
 /// share, where several at once is most of the speed.
-enum ThumbnailTransfer {
+nonisolated enum ThumbnailTransfer {
     private static let logger = Logger(subsystem: ThumbnailCache.appIdentifier, category: "ThumbnailDistribution")
 
     /// Enough to keep a share busy without burying it. Small files over SMB wait

@@ -32,23 +32,25 @@ final class LocalBookmark {
     /// A fixed identifier rather than a `kind` column: the folder is one thing,
     /// not a class of things, and a sentinel costs no schema change. Colliding
     /// with a real `Item.id` or `Volume.id` is not a possibility worth code.
-    static let thumbnailRootID = UUID(uuidString: "5A0E7B3C-0000-4000-A000-000000000001")!
+    static let thumbnailRootID = UUID(uuid: (
+        0x5A, 0x0E, 0x7B, 0x3C, 0x00, 0x00, 0x40, 0x00,
+        0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
+    ))
 }
 
 /// Which version of a book's thumbnail this device has a file for.
 ///
 /// Thumbnails are covers — copyrighted artwork — so they never go to iCloud, and
-/// they are large enough that a device should not fetch one twice. What travels
-/// through iCloud is `Item.coverVersion`, an integer; comparing it against the
-/// version recorded here is the whole of the difference calculation, which is why
-/// nothing has to enumerate twenty thousand files over a network share.
+/// they are large enough that a device should not fetch one twice. The NAS
+/// manifest carries the current version; comparing it with this local row keeps
+/// both the artwork and its distribution bookkeeping out of iCloud.
 ///
 /// Device-specific, so it belongs in the local store and nowhere near the
 /// synced one.
 @Model
 final class LocalCoverState {
     var itemID: UUID = UUID()
-    /// The `Item.coverVersion` this device holds the file for. 0 means none.
+    /// The NAS manifest version this device holds. 0 means none.
     var version: Int = 0
     var bytes: Int = 0
     var updatedAt: Date = Date()
@@ -127,7 +129,7 @@ final class BookmarkVault {
     }
 
     /// Stores (or with `nil`, removes) the bookmark for one item or volume.
-    func setBookmark(_ bookmark: Data?, for targetID: UUID) {
+    func setBookmark(_ bookmark: Data?, for targetID: UUID, saveImmediately: Bool = true) {
         guard let context else { return }
 
         guard let bookmark else {
@@ -135,7 +137,7 @@ final class BookmarkVault {
             if let row = rows.removeValue(forKey: targetID) {
                 context.delete(row)
             }
-            save(context)
+            if saveImmediately { save(context) }
             return
         }
 
@@ -148,6 +150,13 @@ final class BookmarkVault {
             context.insert(row)
             rows[targetID] = row
         }
+        if saveImmediately { save(context) }
+    }
+
+    /// Commits bookmarks accumulated by a bulk import or multi-file drop in one
+    /// transaction instead of one SQLite write per file.
+    func savePendingChanges() {
+        guard let context, context.hasChanges else { return }
         save(context)
     }
 
@@ -162,13 +171,13 @@ final class BookmarkVault {
         do {
             for volume in try context.fetch(FetchDescriptor<Volume>()) {
                 guard let bookmark = volume.bookmarkData else { continue }
-                setBookmark(bookmark, for: volume.id)
+                setBookmark(bookmark, for: volume.id, saveImmediately: false)
                 volume.bookmarkData = nil
                 adopted += 1
             }
             for item in try context.fetch(FetchDescriptor<Item>()) {
                 guard let bookmark = item.bookmarkData else { continue }
-                setBookmark(bookmark, for: item.id)
+                setBookmark(bookmark, for: item.id, saveImmediately: false)
                 item.bookmarkData = nil
                 adopted += 1
             }

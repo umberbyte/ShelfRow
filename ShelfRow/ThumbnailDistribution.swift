@@ -19,7 +19,7 @@ import SwiftData
 /// A file here is named exactly as the local cache names it, so the folder is a
 /// plain copy of the cache rather than a format of its own — nothing to convert
 /// and no table mapping one name to the other.
-enum ThumbnailDistribution {
+nonisolated enum ThumbnailDistribution {
     static let folderName = "ShelfRowThumbnails"
     static let markerName = ".shelfrow-thumbnails.json"
     static let formatVersion = 1
@@ -88,9 +88,9 @@ enum ThumbnailDistribution {
         /// Keyed by the item's UUID string — the same name the file carries.
         var entries: [String: Entry] = [:]
 
-        func entry(for itemID: UUID) -> Entry? { entries[itemID.uuidString] }
+        nonisolated func entry(for itemID: UUID) -> Entry? { entries[itemID.uuidString] }
 
-        var itemIDs: Set<UUID> {
+        nonisolated var itemIDs: Set<UUID> {
             Set(entries.keys.compactMap(UUID.init(uuidString:)))
         }
     }
@@ -366,11 +366,21 @@ enum ThumbnailDistribution {
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: localFile.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-        // One atomic write, which is itself a write to a temporary name in the
-        // same directory followed by a rename. Doing that and then replacing the
-        // file with it again was the same dance twice.
-        let data = try Data(contentsOf: source)
-        try data.write(to: localFile, options: .atomic)
-        return data.count
+        let temporary = localFile.deletingLastPathComponent()
+            .appendingPathComponent(".\(itemID.uuidString).\(ProcessInfo.processInfo.processIdentifier).tmp")
+        try? fileManager.removeItem(at: temporary)
+        do {
+            // FileManager streams the copy. `Data(contentsOf:)` retained every
+            // thumbnail while also asking Data.write for a second temporary copy.
+            try fileManager.copyItem(at: source, to: temporary)
+            let attributes = try fileManager.attributesOfItem(atPath: temporary.path)
+            let bytes = attributes[.size] as? Int ?? 0
+            try? fileManager.removeItem(at: localFile)
+            try fileManager.moveItem(at: temporary, to: localFile)
+            return bytes
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        }
     }
 }

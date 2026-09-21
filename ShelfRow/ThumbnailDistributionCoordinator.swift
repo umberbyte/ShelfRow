@@ -28,6 +28,7 @@ final class ThumbnailDistributionCoordinator {
 
     enum RootStatus: Equatable {
         case notChosen
+        case checking
         case ready(UUID)
         case problem(ThumbnailDistribution.RootProblem)
 
@@ -36,6 +37,7 @@ final class ThumbnailDistributionCoordinator {
         var message: String {
             switch self {
             case .notChosen: return "配布元フォルダが未設定です。"
+            case .checking: return "配布元への接続を確認しています。"
             case .ready: return "配布元に接続できます。"
             case .problem(let problem): return problem.message
             }
@@ -99,6 +101,27 @@ final class ThumbnailDistributionCoordinator {
     private var accessHeld = false
     private var store: CoverDistributionStore?
     private var runTask: Task<Void, Never>?
+    private var rootResolutionTask: Task<Void, Never>?
+    private var automaticWorkTask: Task<Void, Never>?
+    private var automaticPlanInProgress = false
+
+    private struct ResolvedRoot: Sendable {
+        let url: URL
+        let accessHeld: Bool
+        let marker: ThumbnailDistribution.Marker
+        let manifest: ThumbnailDistribution.Manifest
+        let refreshedBookmark: Data?
+    }
+
+    /// The transfer layer reports progress from a sendable background closure.
+    /// The coordinator itself is only dereferenced again on the main actor.
+    nonisolated private final class WeakCoordinatorBox: @unchecked Sendable {
+        weak var value: ThumbnailDistributionCoordinator?
+
+        init(_ value: ThumbnailDistributionCoordinator) {
+            self.value = value
+        }
+    }
 
     var isRunning: Bool { activity != nil }
 
@@ -138,10 +161,8 @@ final class ThumbnailDistributionCoordinator {
         store = CoverDistributionStore(modelContainer: container)
         libraryMode = mode
         resolveRoot()
-        // Nothing is read or counted here. Every one of those passes walks the
-        // whole library, and launch is the worst moment to spend that — most of
-        // the time there is no folder to distribute through at all, and when
-        // there is, the pass a few seconds later does the work anyway.
+        // Root validation starts asynchronously. The library-sized inventory is
+        // delayed until after the first window has had time to render.
     }
 
     /// Whether this device has ever been offered a bulk fetch, which is what makes
@@ -173,30 +194,11 @@ final class ThumbnailDistributionCoordinator {
             return
         }
 
-        root = url
-        accessHeld = url.startAccessingSecurityScopedResource()
-
-        switch ThumbnailDistribution.validate(root: url) {
-        case .success(let marker):
-            status = .ready(marker.libraryID)
-            publishRootForCoverGeneration(url)
-            lastMessage = nil
-        case .failure(.notADistributionFolder) where initialiseIfNeeded:
-            do {
-                let marker = try ThumbnailDistribution.initialiseRoot(at: url)
-                status = .ready(marker.libraryID)
-                publishRootForCoverGeneration(url)
-                lastMessage = "配布元フォルダを初期化しました。"
-            } catch {
-                status = .problem(.unreadableMarker(error.localizedDescription))
-                lastMessage = "配布元フォルダを初期化できませんでした: \(error.localizedDescription)"
-            }
-        case .failure(let problem):
-            status = .problem(problem)
-            lastMessage = problem.message
-        }
-
-        Task { await refreshCounts() }
+        beginResolvingRoot(
+            bookmark: BookmarkVault.shared.bookmark(for: LocalBookmark.thumbnailRootID),
+            initialiseIfNeeded: initialiseIfNeeded,
+            refreshCountsWhenDone: true
+        )
     }
 
     func forgetRoot() {
@@ -214,7 +216,60 @@ final class ThumbnailDistributionCoordinator {
             status = .notChosen
             return
         }
+        beginResolvingRoot(bookmark: bookmark, initialiseIfNeeded: false, refreshCountsWhenDone: false)
+    }
 
+    private func beginResolvingRoot(
+        bookmark: Data?,
+        initialiseIfNeeded: Bool,
+        refreshCountsWhenDone: Bool
+    ) {
+        rootResolutionTask?.cancel()
+        guard let bookmark else {
+            status = .notChosen
+            return
+        }
+        status = .checking
+        lastMessage = nil
+
+        rootResolutionTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Self.resolveRootOffMain(bookmark: bookmark, initialiseIfNeeded: initialiseIfNeeded)
+            }.value
+            guard !Task.isCancelled, let self else {
+                if case .success(let resolved) = result, resolved.accessHeld {
+                    resolved.url.stopAccessingSecurityScopedResource()
+                }
+                return
+            }
+            self.rootResolutionTask = nil
+            switch result {
+            case .success(let resolved):
+                self.root = resolved.url
+                self.accessHeld = resolved.accessHeld
+                self.status = .ready(resolved.marker.libraryID)
+                self.publishRootForCoverGeneration(resolved.url, manifest: resolved.manifest)
+                if let refreshedBookmark = resolved.refreshedBookmark {
+                    BookmarkVault.shared.setBookmark(refreshedBookmark, for: LocalBookmark.thumbnailRootID)
+                }
+                if initialiseIfNeeded {
+                    self.lastMessage = "配布元フォルダを確認しました。"
+                }
+                if refreshCountsWhenDone {
+                    await self.refreshCounts()
+                }
+                self.scheduleAutomaticWork(after: .seconds(5))
+            case .failure(let problem):
+                self.status = .problem(problem)
+                self.lastMessage = problem.message
+            }
+        }
+    }
+
+    nonisolated private static func resolveRootOffMain(
+        bookmark: Data,
+        initialiseIfNeeded: Bool
+    ) -> Result<ResolvedRoot, ThumbnailDistribution.RootProblem> {
         var isStale = false
         guard let url = try? URL(
             resolvingBookmarkData: bookmark,
@@ -222,45 +277,63 @@ final class ThumbnailDistributionCoordinator {
             relativeTo: nil,
             bookmarkDataIsStale: &isStale
         ) else {
-            status = .problem(.unreachable)
-            return
+            return .failure(.unreachable)
         }
 
-        root = url
-        accessHeld = url.startAccessingSecurityScopedResource()
-
+        let accessHeld = url.startAccessingSecurityScopedResource()
+        let validation: Result<ThumbnailDistribution.Marker, ThumbnailDistribution.RootProblem>
         switch ThumbnailDistribution.validate(root: url) {
-        case .success(let marker):
-            status = .ready(marker.libraryID)
-            publishRootForCoverGeneration(url)
-            if isStale, let refreshed = try? url.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            ) {
-                BookmarkVault.shared.setBookmark(refreshed, for: LocalBookmark.thumbnailRootID)
+        case .failure(.notADistributionFolder) where initialiseIfNeeded:
+            do {
+                validation = .success(try ThumbnailDistribution.initialiseRoot(at: url))
+            } catch {
+                validation = .failure(.unreadableMarker(error.localizedDescription))
             }
-        case .failure(let problem):
-            status = .problem(problem)
+        case let result:
+            validation = result
         }
+
+        guard case .success(let marker) = validation else {
+            if accessHeld { url.stopAccessingSecurityScopedResource() }
+            if case .failure(let problem) = validation { return .failure(problem) }
+            return .failure(.unreachable)
+        }
+
+        let refreshedBookmark = isStale
+            ? try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+            : nil
+        return .success(ResolvedRoot(
+            url: url,
+            accessHeld: accessHeld,
+            marker: marker,
+            manifest: ThumbnailDistribution.readManifest(in: url),
+            refreshedBookmark: refreshedBookmark
+        ))
     }
 
     /// Lets cover generation read from the folder before it opens an archive —
     /// but only while the library is shared. With syncing off there is no other
     /// device to have put anything there for this one.
-    private func publishRootForCoverGeneration(_ url: URL) {
+    private func publishRootForCoverGeneration(
+        _ url: URL,
+        manifest loadedManifest: ThumbnailDistribution.Manifest
+    ) {
         guard libraryMode == .cloud else {
             ThumbnailDistribution.currentRoot = nil
             manifest = ThumbnailDistribution.Manifest()
             return
         }
         ThumbnailDistribution.currentRoot = url
-        manifest = ThumbnailDistribution.readManifest(in: url)
+        manifest = loadedManifest
         ThumbnailDistribution.setPublishedCovers(manifest.itemIDs)
         Self.logger.info("The distribution folder lists \(self.manifest.entries.count, privacy: .public) covers")
     }
 
     private func releaseRoot() {
+        rootResolutionTask?.cancel()
+        rootResolutionTask = nil
+        automaticWorkTask?.cancel()
+        automaticWorkTask = nil
         if accessHeld, let root {
             root.stopAccessingSecurityScopedResource()
         }
@@ -301,10 +374,16 @@ final class ThumbnailDistributionCoordinator {
 
     /// Hands everything this device has to the distribution folder, moving each
     /// book's version along so the others learn of it through iCloud (§21.11).
-    func uploadEverything() {
+    func uploadEverything(targets suppliedTargets: [CoverUploadTarget]? = nil) {
         let manifest = manifest
         start(.uploading) { [self] store, root, report in
-            guard let targets = try? await store.uploadTargets(manifest: manifest), !targets.isEmpty else {
+            let targets: [CoverUploadTarget]
+            if let suppliedTargets {
+                targets = suppliedTargets
+            } else {
+                targets = (try? await store.uploadTargets(manifest: manifest)) ?? []
+            }
+            guard !targets.isEmpty else {
                 return "配布元へ登録するサムネイルはありませんでした。"
             }
             report(0, targets.count)
@@ -333,10 +412,16 @@ final class ThumbnailDistributionCoordinator {
     }
 
     /// Fetches everything this device is missing.
-    func fetchEverything() {
+    func fetchEverything(targets suppliedTargets: [CoverFetchTarget]? = nil) {
         let manifest = manifest
         start(.fetching) { [self] store, root, report in
-            guard let targets = try? await store.fetchTargets(manifest: manifest), !targets.isEmpty else {
+            let targets: [CoverFetchTarget]
+            if let suppliedTargets {
+                targets = suppliedTargets
+            } else {
+                targets = (try? await store.fetchTargets(manifest: manifest)) ?? []
+            }
+            guard !targets.isEmpty else {
                 return "取得するサムネイルはありませんでした。"
             }
             report(0, targets.count)
@@ -345,9 +430,13 @@ final class ThumbnailDistributionCoordinator {
                 report(done, targets.count)
             }
             await store.recordFetched(results)
-            // The rows already on screen were drawn without these files; the
-            // memory cache remembers their absence and has to be told.
-            await ThumbnailCache.shared.invalidateMemoryCache()
+            let changedIDs = Set(results.lazy.filter { $0.errorCode == nil }.map(\.itemID))
+            await ThumbnailCache.shared.invalidate(itemIDs: changedIDs)
+            if !changedIDs.isEmpty {
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .coverDidChange, object: changedIDs)
+                }
+            }
 
             let failed = results.filter { $0.errorCode != nil }.count
             return failed == 0
@@ -364,7 +453,10 @@ final class ThumbnailDistributionCoordinator {
     ) async {
         guard !added.isEmpty else { return }
         do {
-            manifest = try ThumbnailDistribution.updateManifest(in: root, merging: added)
+            let updated = try await Task.detached(priority: .utility) {
+                try ThumbnailDistribution.updateManifest(in: root, merging: added)
+            }.value
+            manifest = updated
             ThumbnailDistribution.setPublishedCovers(manifest.itemIDs)
         } catch {
             Self.logger.error("Could not update the distribution index: \(error.localizedDescription, privacy: .public)")
@@ -383,7 +475,10 @@ final class ThumbnailDistributionCoordinator {
     /// reporting — a laptop away from the NAS is in that state most of the day —
     /// so this simply does nothing until it can.
     func considerAutomaticWork() async {
-        guard isActive, !isRunning, autoFetchEnabled, pendingOffer == nil, let store else { return }
+        guard isActive, !isRunning, !automaticPlanInProgress,
+              autoFetchEnabled, pendingOffer == nil, let store else { return }
+        automaticPlanInProgress = true
+        defer { automaticPlanInProgress = false }
 
         // Handing over a cover this device made is not the first device's
         // privilege — any Mac may generate the one book being looked at, and the
@@ -391,23 +486,24 @@ final class ThumbnailDistributionCoordinator {
         // library-sized registration, which has its own button: a run of that
         // size here would mean two Macs had generated the same twenty thousand
         // covers, which the rules above are there to prevent.
-        await store.adoptLocalFiles(manifest: manifest)
-        await store.forgetOrphanedStates()
+        guard let plan = try? await store.automaticPlan(manifest: manifest) else { return }
 
-        if let uploads = try? await store.uploadTargets(manifest: manifest),
-           !uploads.isEmpty,
-           uploads.count <= Self.quietUploadCount {
-            uploadEverything()
+        if !plan.uploads.isEmpty, plan.uploads.count <= Self.quietUploadCount {
+            uploadEverything(targets: plan.uploads)
             return
         }
 
-        guard let pending = await pendingFetch() else { return }
+        guard !plan.fetches.isEmpty else { return }
+        let pending = (
+            count: plan.fetches.count,
+            bytes: plan.fetches.reduce(0) { $0 + $1.expectedBytes }
+        )
 
         let quiet = hasBeenOfferedBulkFetch
             && pending.count < Self.quietFetchCount
             && pending.bytes < Self.quietFetchBytes
         guard !quiet else {
-            fetchEverything()
+            fetchEverything(targets: plan.fetches)
             return
         }
 
@@ -416,6 +512,19 @@ final class ThumbnailDistributionCoordinator {
             bytes: pending.bytes,
             hasRoom: hasRoomForFetch(bytes: pending.bytes)
         )
+    }
+
+    /// Coalesces CloudKit/root events before taking a library-sized cache
+    /// inventory. A burst of remote saves should cause one pass, not one per
+    /// record batch.
+    func scheduleAutomaticWork(after delay: Duration = .seconds(2)) {
+        automaticWorkTask?.cancel()
+        automaticWorkTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.automaticWorkTask = nil
+            await self.considerAutomaticWork()
+        }
     }
 
     /// Accepts the offer.
@@ -445,12 +554,13 @@ final class ThumbnailDistributionCoordinator {
 
         activity = Activity(kind: kind, done: 0, total: 0)
         lastMessage = nil
+        let coordinator = WeakCoordinatorBox(self)
 
         runTask = Task { [weak self] in
             let report: @Sendable (Int, Int) -> Void = { done, total in
-                Task { @MainActor [weak self] in
-                    guard self?.activity != nil else { return }
-                    self?.activity = Activity(kind: kind, done: done, total: total)
+                Task { @MainActor in
+                    guard coordinator.value?.activity != nil else { return }
+                    coordinator.value?.activity = Activity(kind: kind, done: done, total: total)
                 }
             }
 
@@ -463,6 +573,7 @@ final class ThumbnailDistributionCoordinator {
                 self.lastMessage = message
             }
             await self.refreshCounts()
+            self.scheduleAutomaticWork(after: .seconds(1))
         }
     }
 }
