@@ -786,7 +786,10 @@ struct GeneralSettingsView: View {
     @AppStorage("compactDisplay") private var compactDisplay = false
     @AppStorage("listColumnOrderAppliesGlobally") private var listColumnOrderAppliesGlobally = true
     @AppStorage("listColumnOrdersByCollection") private var collectionColumnOrdersRaw = "{}"
+    @AppStorage("listColumnWidthAppliesGlobally") private var listColumnWidthAppliesGlobally = true
+    @AppStorage("listColumnWidthsByCollection") private var collectionColumnWidthsRaw = "{}"
     @State private var isConfirmingGlobalColumnOrder = false
+    @State private var isConfirmingGlobalColumnWidth = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -849,6 +852,29 @@ struct GeneralSettingsView: View {
                 PreferencesDivider()
 
                 PreferencesSettingRow(
+                    icon: "arrow.left.and.right",
+                    title: "カラムの幅",
+                    description: listColumnWidthAppliesGlobally
+                        ? "リストで変更したカラム幅を、すべてのシェルフに適用します。"
+                        : "リストで変更したカラム幅を、シェルフごとに保存します。"
+                ) {
+                    Toggle("カラムの幅を全体に適用する", isOn: Binding(
+                        get: { listColumnWidthAppliesGlobally },
+                        set: { newValue in
+                            if newValue {
+                                isConfirmingGlobalColumnWidth = true
+                            } else {
+                                listColumnWidthAppliesGlobally = false
+                            }
+                        }
+                    ))
+                    .font(PreferencesLayout.bodyFont)
+                    .toggleStyle(.switch)
+                }
+
+                PreferencesDivider()
+
+                PreferencesSettingRow(
                     icon: "xmark.circle",
                     title: "終了動作",
                     description: "メインウインドウを閉じた時にShelfRowを終了します。"
@@ -870,6 +896,15 @@ struct GeneralSettingsView: View {
             }
         } message: {
             Text("すべてのカラムが全体の並び順に追随します。シェルフごとに保存した現在の並び順は削除され、元に戻せません。")
+        }
+        .alert("全体のカラム幅に統一しますか？", isPresented: $isConfirmingGlobalColumnWidth) {
+            Button("キャンセル", role: .cancel) {}
+            Button("OK", role: .destructive) {
+                collectionColumnWidthsRaw = "{}"
+                listColumnWidthAppliesGlobally = true
+            }
+        } message: {
+            Text("すべてのカラムが全体の幅に追随します。シェルフごとに保存した現在のカラム幅は削除され、元に戻せません。")
         }
     }
 }

@@ -69,6 +69,12 @@ private struct InspectorDraft: Equatable {
     }
 }
 
+private struct ActiveColumnResize: Equatable {
+    let key: ItemSortKey
+    let startingWidth: Double
+    var width: Double
+}
+
 private struct ThumbnailRepairScanResult: Sendable {
     var itemIDs: [UUID]
     var monochromeCount: Int
@@ -324,6 +330,9 @@ struct ContentView: View {
     @AppStorage("listColumnOrderAppliesGlobally") private var listColumnOrderAppliesGlobally = true
     @AppStorage("listColumnOrderGlobal") private var globalColumnOrderRaw = ""
     @AppStorage("listColumnOrdersByCollection") private var collectionColumnOrdersRaw = "{}"
+    @AppStorage("listColumnWidthAppliesGlobally") private var listColumnWidthAppliesGlobally = true
+    @AppStorage("listColumnWidthsGlobal") private var globalColumnWidthsRaw = "{}"
+    @AppStorage("listColumnWidthsByCollection") private var collectionColumnWidthsRaw = "{}"
 
     // Cached filtered/sorted items (recomputed only when displayToken changes)
     @State private var displayItems: [Item] = []
@@ -374,6 +383,7 @@ struct ContentView: View {
     @State private var isPerformingFileOperation = false
     @State private var draggingShelfID: UUID? = nil
     @State private var draggingListColumn: ItemSortKey?
+    @State private var activeColumnResize: ActiveColumnResize?
     @State private var staticShelfOrderIDs: [UUID] = []
     @State private var smartShelfOrderIDs: [UUID] = []
     @State private var editingShelfID: UUID? = nil
@@ -1256,7 +1266,7 @@ struct ContentView: View {
         .relation, .keywordA, .keywordB, .lastReadDate, .addedDate
     ]
 
-    private func columnWidth(_ key: ItemSortKey) -> CGFloat? {
+    private func defaultColumnWidth(_ key: ItemSortKey) -> CGFloat? {
         switch key {
         case .unread:       return displayMetrics.size(38)
         case .bookType:     return displayMetrics.size(38)
@@ -1271,6 +1281,27 @@ struct ContentView: View {
         case .addedDate:    return displayMetrics.size(84)
         case .pages:        return displayMetrics.size(56)
         }
+    }
+
+    private var storedColumnWidths: LibraryColumnWidth.Widths {
+        let globalWidths = LibraryColumnWidth.decode(globalColumnWidthsRaw)
+        guard !listColumnWidthAppliesGlobally else { return globalWidths }
+        let scope = LibraryColumnOrder.scopeKey(for: sidebarSelection)
+        return LibraryColumnWidth.decodeScoped(collectionColumnWidthsRaw)[scope] ?? globalWidths
+    }
+
+    private var columnWidthDisplayScale: Double {
+        compactDisplay ? Double(DisplayMetrics.elementScale) : 1
+    }
+
+    private func columnWidth(_ key: ItemSortKey) -> CGFloat? {
+        if let activeColumnResize, activeColumnResize.key == key {
+            return CGFloat(activeColumnResize.width * columnWidthDisplayScale)
+        }
+        if let storedWidth = storedColumnWidths[key] {
+            return CGFloat(storedWidth * columnWidthDisplayScale)
+        }
+        return defaultColumnWidth(key)
     }
 
     private func columnAlignment(_ key: ItemSortKey) -> Alignment {
@@ -1309,6 +1340,49 @@ struct ContentView: View {
             var orders = LibraryColumnOrder.decodeScoped(collectionColumnOrdersRaw)
             orders[LibraryColumnOrder.scopeKey(for: sidebarSelection)] = moved
             collectionColumnOrdersRaw = LibraryColumnOrder.encodeScoped(orders)
+        }
+    }
+
+    private func updateListColumnResize(
+        _ key: ItemSortKey,
+        measuredWidth: CGFloat,
+        translation: CGFloat
+    ) {
+        let scale = columnWidthDisplayScale
+        let resize: ActiveColumnResize
+        if let activeColumnResize, activeColumnResize.key == key {
+            resize = activeColumnResize
+        } else {
+            let startingWidth = Double(measuredWidth) / scale
+            resize = ActiveColumnResize(key: key, startingWidth: startingWidth, width: startingWidth)
+        }
+        let proposedWidth = resize.startingWidth + (Double(translation) / scale)
+        activeColumnResize = ActiveColumnResize(
+            key: key,
+            startingWidth: resize.startingWidth,
+            width: LibraryColumnWidth.clamped(proposedWidth, for: key)
+        )
+    }
+
+    private func finishListColumnResize(_ key: ItemSortKey) {
+        guard let activeColumnResize, activeColumnResize.key == key else { return }
+        persistListColumnWidth(activeColumnResize.width, for: key)
+        self.activeColumnResize = nil
+    }
+
+    private func persistListColumnWidth(_ width: Double, for key: ItemSortKey) {
+        let width = LibraryColumnWidth.clamped(width, for: key)
+        if listColumnWidthAppliesGlobally {
+            var widths = LibraryColumnWidth.decode(globalColumnWidthsRaw)
+            widths[key] = width
+            globalColumnWidthsRaw = LibraryColumnWidth.encode(widths)
+        } else {
+            let scope = LibraryColumnOrder.scopeKey(for: sidebarSelection)
+            var widthsByScope = LibraryColumnWidth.decodeScoped(collectionColumnWidthsRaw)
+            var widths = widthsByScope[scope] ?? LibraryColumnWidth.decode(globalColumnWidthsRaw)
+            widths[key] = width
+            widthsByScope[scope] = widths
+            collectionColumnWidthsRaw = LibraryColumnWidth.encodeScoped(widthsByScope)
         }
     }
 
@@ -1588,7 +1662,49 @@ struct ContentView: View {
                 .contextMenu {
                     headerContextMenu
                 }
-                .accessibilityHint("ドラッグしてカラムの位置を変更できます")
+                .overlay {
+                    GeometryReader { geometry in
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            Color.clear
+                                .frame(width: 8)
+                                .contentShape(Rectangle())
+                                .overlay {
+                                    Rectangle()
+                                        .fill(
+                                            activeColumnResize?.key == col.key
+                                                ? Color.accentColor.opacity(0.9)
+                                                : separatorTintColor.opacity(0.55)
+                                        )
+                                        .frame(width: activeColumnResize?.key == col.key ? 2 : 1)
+                                        .allowsHitTesting(false)
+                                }
+                                .onHover { hovering in
+                                    if hovering {
+                                        NSCursor.resizeLeftRight.set()
+                                    } else {
+                                        NSCursor.arrow.set()
+                                    }
+                                }
+                                .highPriorityGesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onChanged { value in
+                                            updateListColumnResize(
+                                                col.key,
+                                                measuredWidth: geometry.size.width,
+                                                translation: value.translation.width
+                                            )
+                                        }
+                                        .onEnded { _ in
+                                            finishListColumnResize(col.key)
+                                        }
+                                )
+                                .accessibilityLabel("\(col.title)カラムの幅")
+                                .accessibilityHint("左右にドラッグして幅を変更できます")
+                        }
+                    }
+                }
+                .accessibilityHint("ドラッグで位置を変更し、右端をドラッグして幅を変更できます")
                 .onDrag {
                     draggingListColumn = col.key
                     return NSItemProvider(object: col.key.rawValue as NSString)
