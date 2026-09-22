@@ -12,6 +12,30 @@ import SwiftData
 /// on a background thread to keep the main UI responsive.
 @ModelActor
 actor LibraryImporter {
+    private struct ShelfIdentity: Hashable {
+        let title: String
+        let type: Int
+    }
+
+    private struct ImportedTextFields {
+        let genre: String
+        let relation: String
+        let keywordA: String
+        let keywordB: String
+        let memo: String
+
+        init(_ bookData: [String: Any]) {
+            genre = bookData["Genre"] as? String ?? ""
+            relation = bookData["Neta"] as? String ?? ""
+            keywordA = bookData["Keyword A"] as? String ?? ""
+            keywordB = bookData["Keyword B"] as? String ?? ""
+            // Stackroom libraries in the wild use both spellings. The supplied
+            // item 25192 uses "Memo", while older exports have used "memo".
+            memo = bookData["Memo"] as? String
+                ?? bookData["memo"] as? String
+                ?? ""
+        }
+    }
     
     /// Cleans invalid XML 1.0 control characters from raw data.
     /// In XML 1.0, bytes in ranges 0x00-0x08, 0x0B-0x0C, and 0x0E-0x1F are strictly forbidden.
@@ -93,7 +117,9 @@ actor LibraryImporter {
             if let lid = item.legacyID {
                 existingItemsByLegacyID[lid] = item
             }
-            existingItemsByPath[item.relativePath] = item
+            if !item.relativePath.isEmpty {
+                existingItemsByPath[item.relativePath] = item
+            }
         }
         
         var volumesCache: [String: Volume] = [:]
@@ -115,23 +141,41 @@ actor LibraryImporter {
             guard let bookData = val as? [String: Any] else { continue }
             
             let legacyID = bookData["ID"] as? Int
-            let filePath = bookData["Path"] as? String ?? ""
+            let explicitPath = bookData["Path"] as? String ?? ""
+            let coverPath = bookData["Cover Image Path"] as? String ?? ""
+            let filePath = explicitPath.isEmpty ? coverPath : explicitPath
             let (volumePath, volumeName, relativePath) = PathParser.split(filePath)
+            let textFields = ImportedTextFields(bookData)
             
             // Check if item already exists (Merge Strategy)
             let existingItem: Item?
             if let lid = legacyID, let item = existingItemsByLegacyID[lid] {
                 existingItem = item
-            } else if let item = existingItemsByPath[relativePath] {
+            } else if !relativePath.isEmpty, let item = existingItemsByPath[relativePath] {
                 existingItem = item
             } else {
                 existingItem = nil
             }
             
             if let existing = existingItem {
-                // Skip importing but map in cache for playlist relationship matching
+                // Preserve edits made in ShelfRow, while filling values the old
+                // importer did not understand. Its former Neta -> memo mapping is
+                // recognisable and can be repaired without guessing.
+                let relationWasStoredAsMemo = !textFields.relation.isEmpty
+                    && existing.relation.isEmpty
+                    && existing.memo == textFields.relation
+                if existing.genre.isEmpty { existing.genre = textFields.genre }
+                if existing.relation.isEmpty { existing.relation = textFields.relation }
+                if existing.keywordA.isEmpty { existing.keywordA = textFields.keywordA }
+                if existing.keywordB.isEmpty { existing.keywordB = textFields.keywordB }
+                if existing.memo.isEmpty || relationWasStoredAsMemo {
+                    existing.memo = textFields.memo
+                }
+
                 if let lid = legacyID {
+                    if existing.legacyID == nil { existing.legacyID = lid }
                     importedItemsCache[lid] = existing
+                    existingItemsByLegacyID[lid] = existing
 
                     // Copy the legacy thumbnail for already-imported items too
                     // (e.g. re-import after granting folder access).
@@ -161,10 +205,6 @@ actor LibraryImporter {
             let fileType = bookData["File Type"] as? Int ?? 0
             let coverImageName = bookData["Cover Image Name"] as? String ?? ""
             let coverImagePath = bookData["Cover Image Path"] as? String ?? ""
-            let keywordA = bookData["Keyword A"] as? String ?? ""
-            let keywordB = bookData["Keyword B"] as? String ?? ""
-            let memo = bookData["Neta"] as? String ?? "" // "Neta" maps to Memo
-            
             // Dates
             let addedDate = bookData["Date Added"] as? Date ?? Date()
             let lastReadDate = bookData["Play Date"] as? Date
@@ -190,11 +230,11 @@ actor LibraryImporter {
                 author: author,
                 rating: rating,
                 isUnread: isUnread,
-                genre: "", 
-                relation: "",
-                keywordA: keywordA,
-                keywordB: keywordB,
-                memo: memo,
+                genre: textFields.genre,
+                relation: textFields.relation,
+                keywordA: textFields.keywordA,
+                keywordB: textFields.keywordB,
+                memo: textFields.memo,
                 coverImageName: coverImageName,
                 coverImagePath: coverImagePath,
                 addedDate: addedDate,
@@ -207,6 +247,7 @@ actor LibraryImporter {
             modelContext.insert(item)
             if let lid = legacyID {
                 importedItemsCache[lid] = item
+                existingItemsByLegacyID[lid] = item
                 
                 // Bulk copy the thumbnail during import so the user can safely delete the old app directory immediately.
                 let legacyThumbPath = thumbnailRootPath + "/\(lid)/thumbnail.jpg"
@@ -238,7 +279,10 @@ actor LibraryImporter {
         // Fetch existing shelves (Merge Strategy)
         let existingShelvesFetch = FetchDescriptor<Shelf>()
         let existingShelves = try modelContext.fetch(existingShelvesFetch)
-        let existingShelvesByTitleAndType = Set(existingShelves.map { "\($0.title)_\($0.type)" })
+        var shelvesByIdentity = Dictionary(
+            existingShelves.map { (ShelfIdentity(title: $0.title, type: $0.type), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         
         // --- 2. Import Playlists/Shelves ---
         var playlistsProcessed = 0
@@ -248,11 +292,22 @@ actor LibraryImporter {
             let title = pData["Title"] as? String ?? "Unnamed Shelf"
             let icon = pData["Icon"] as? Int ?? 0
             let type = pData["Type"] as? Int ?? 0
+            let identity = ShelfIdentity(title: title, type: type)
             
             playlistsProcessed += 1
             
-            // Skip duplicate shelves
-            if existingShelvesByTitleAndType.contains("\(title)_\(type)") {
+            // An updated XML can add books to an existing static shelf. Merge
+            // membership by legacy ID and deliberately keep local/removed XML
+            // members: repeat import is additive and never deletes data.
+            if let existingShelf = shelvesByIdentity[identity] {
+                if type == 0, let itemIDs = pData["Items"] as? [Int] {
+                    merge(
+                        itemIDs: itemIDs,
+                        into: existingShelf,
+                        importedItems: importedItemsCache,
+                        existingItems: existingItemsByLegacyID
+                    )
+                }
                 let currentProcessed = playlistsProcessed
                 await MainActor.run {
                     progress(totalBooks, totalBooks, currentProcessed, totalPlaylists)
@@ -284,16 +339,16 @@ actor LibraryImporter {
                 smartConditionsJson: conditionsJson
             )
             modelContext.insert(shelf)
+            shelvesByIdentity[identity] = shelf
             
             // Map legacy IDs to items for Static Shelves (Type 0)
             if type == 0, let itemIDs = pData["Items"] as? [Int] {
-                var associatedItems: [Item] = []
-                for id in itemIDs {
-                    if let item = importedItemsCache[id] {
-                        associatedItems.append(item)
-                    }
-                }
-                shelf.items = associatedItems
+                merge(
+                    itemIDs: itemIDs,
+                    into: shelf,
+                    importedItems: importedItemsCache,
+                    existingItems: existingItemsByLegacyID
+                )
             }
             
             playlistsImported += 1
@@ -308,5 +363,21 @@ actor LibraryImporter {
         try modelContext.save()
         
         return (booksImported, playlistsImported)
+    }
+
+    private func merge(
+        itemIDs: [Int],
+        into shelf: Shelf,
+        importedItems: [Int: Item],
+        existingItems: [Int: Item]
+    ) {
+        var items = shelf.items ?? []
+        var presentIDs = Set(items.map(\.id))
+        for legacyID in itemIDs {
+            guard let item = importedItems[legacyID] ?? existingItems[legacyID],
+                  presentIDs.insert(item.id).inserted else { continue }
+            items.append(item)
+        }
+        shelf.items = items
     }
 }
