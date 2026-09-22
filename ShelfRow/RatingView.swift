@@ -7,6 +7,14 @@
 
 import SwiftUI
 
+nonisolated enum RatingSelection {
+    static func value(afterClicking clicked: Int, current: Int, maximum: Int) -> Int {
+        let validMaximum = max(maximum, 0)
+        let selected = min(max(clicked, 0), validMaximum)
+        return current == selected ? 0 : selected
+    }
+}
+
 struct RatingView: View {
     @Binding var rating: Int
     var maxRating = 5
@@ -16,25 +24,28 @@ struct RatingView: View {
         HStack(spacing: 2) {
             ForEach(1...maxRating, id: \.self) { index in
                 let isFilled = index <= rating
-                Image(systemName: isFilled ? "star.fill" : "star")
-                    .foregroundColor(isFilled ? .yellow : .secondary.opacity(0.4))
-                    .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: 0, y: 1)
-                    .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: 0, y: -1)
-                    .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: 1, y: 0)
-                    .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: -1, y: 0)
-                    .onTapGesture {
-                        if interactive {
-                            if rating == index {
-                                rating = 0 // Toggle off if clicked same rating
-                            } else {
-                                rating = index
-                            }
-                        }
-                    }
-                    .disabled(!interactive)
+                Button {
+                    rating = RatingSelection.value(
+                        afterClicking: index,
+                        current: rating,
+                        maximum: maxRating
+                    )
+                } label: {
+                    Image(systemName: isFilled ? "star.fill" : "star")
+                        .foregroundColor(isFilled ? .yellow : .secondary.opacity(0.4))
+                        .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: 0, y: 1)
+                        .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: 0, y: -1)
+                        .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: 1, y: 0)
+                        .shadow(color: isFilled ? .black.opacity(0.85) : .clear, radius: 0, x: -1, y: 0)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!interactive)
+                .accessibilityLabel("評価 \(index)")
+                .accessibilityValue(rating == index ? "選択中" : "未選択")
             }
         }
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("評価")
         .accessibilityValue("\(rating) / \(maxRating)")
         .accessibilityAdjustableAction { direction in

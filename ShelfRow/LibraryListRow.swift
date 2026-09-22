@@ -1,3 +1,5 @@
+import AppKit
+import SwiftData
 import SwiftUI
 
 struct LibraryListColumn: Identifiable {
@@ -15,6 +17,9 @@ struct LibraryListRow: View {
     let displayMetrics: DisplayMetrics
     let columns: [LibraryListColumn]
     let typeNames: [String]
+    let onPrimaryClick: (NSEvent.ModifierFlags) -> Void
+    let onDoubleClick: () -> Void
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme) private var colorScheme
     private var isDarkAppearance: Bool { colorScheme == .dark }
     private var primaryTextColor: Color { Color(nsColor: .labelColor) }
@@ -26,6 +31,14 @@ struct LibraryListRow: View {
                 listCell(col, item, isSelected: isSelected)
                     .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: col.alignment)
                     .frame(width: col.width, alignment: col.alignment)
+                    .overlay {
+                        if col.key != .rating {
+                            PrimaryClickOverlay(
+                                onPrimaryClick: onPrimaryClick,
+                                onDoubleClick: onDoubleClick
+                            )
+                        }
+                    }
             }
         }
     }
@@ -53,7 +66,13 @@ struct LibraryListRow: View {
                 .foregroundColor(primaryColor)
                 .lineLimit(1)
         case .rating:
-            RatingView(rating: .constant(item.rating), interactive: false)
+            RatingView(rating: Binding(
+                get: { item.rating },
+                set: { newValue in
+                    item.rating = newValue
+                    try? modelContext.save()
+                }
+            ))
                 .font(displayMetrics.font(11))
         case .author:
             Text(item.author)
