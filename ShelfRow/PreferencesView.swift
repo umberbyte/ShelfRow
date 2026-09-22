@@ -784,6 +784,9 @@ struct GeneralSettingsView: View {
     @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue
     @AppStorage("advancedCloseOnExit") private var closeOnExit = true
     @AppStorage("compactDisplay") private var compactDisplay = false
+    @AppStorage("listColumnOrderAppliesGlobally") private var listColumnOrderAppliesGlobally = true
+    @AppStorage("listColumnOrdersByCollection") private var collectionColumnOrdersRaw = "{}"
+    @State private var isConfirmingGlobalColumnOrder = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -823,6 +826,29 @@ struct GeneralSettingsView: View {
                 PreferencesDivider()
 
                 PreferencesSettingRow(
+                    icon: "rectangle.split.3x1",
+                    title: "カラムの並び順",
+                    description: listColumnOrderAppliesGlobally
+                        ? "リストで変更した並び順を、すべてのシェルフに適用します。"
+                        : "リストで変更した並び順を、シェルフごとに保存します。"
+                ) {
+                    Toggle("カラムの並び順を全体に適用する", isOn: Binding(
+                        get: { listColumnOrderAppliesGlobally },
+                        set: { newValue in
+                            if newValue {
+                                isConfirmingGlobalColumnOrder = true
+                            } else {
+                                listColumnOrderAppliesGlobally = false
+                            }
+                        }
+                    ))
+                    .font(PreferencesLayout.bodyFont)
+                    .toggleStyle(.switch)
+                }
+
+                PreferencesDivider()
+
+                PreferencesSettingRow(
                     icon: "xmark.circle",
                     title: "終了動作",
                     description: "メインウインドウを閉じた時にShelfRowを終了します。"
@@ -836,6 +862,15 @@ struct GeneralSettingsView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .alert("全体の並び順に統一しますか？", isPresented: $isConfirmingGlobalColumnOrder) {
+            Button("キャンセル", role: .cancel) {}
+            Button("OK", role: .destructive) {
+                collectionColumnOrdersRaw = "{}"
+                listColumnOrderAppliesGlobally = true
+            }
+        } message: {
+            Text("すべてのカラムが全体の並び順に追随します。シェルフごとに保存した現在の並び順は削除され、元に戻せません。")
+        }
     }
 }
 

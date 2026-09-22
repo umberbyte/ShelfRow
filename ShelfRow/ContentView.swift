@@ -185,8 +185,36 @@ private struct ShelfDropDelegate: DropDelegate {
     }
 }
 
+private struct ListColumnDropDelegate: DropDelegate {
+    let target: ItemSortKey
+    @Binding var draggingColumn: ItemSortKey?
+    let moveAction: (ItemSortKey, ItemSortKey) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggingColumn != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let source = draggingColumn, source != target else { return }
+        moveAction(source, target)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingColumn = nil
+        return true
+    }
+
+    func dropExited(info: DropInfo) {
+        // Keep the source while crossing gaps between adjacent header cells.
+    }
+}
+
 /// Sort keys for the main content view (右クリック > 並び替え, list headers).
-enum ItemSortKey: String, CaseIterable, Identifiable, Sendable {
+enum ItemSortKey: String, CaseIterable, Identifiable, Hashable, Sendable {
     case unread, bookType, title, rating, author, genre, relation, keywordA, keywordB, addedDate, lastReadDate, pages
 
     var id: String { rawValue }
@@ -293,6 +321,9 @@ struct ContentView: View {
 
     // Visible list columns (ヘッダー右クリックで切替、title列は常に表示)
     @AppStorage("listVisibleColumns") private var listVisibleColumnsRaw = "unread,bookType,rating,author,genre,addedDate"
+    @AppStorage("listColumnOrderAppliesGlobally") private var listColumnOrderAppliesGlobally = true
+    @AppStorage("listColumnOrderGlobal") private var globalColumnOrderRaw = ""
+    @AppStorage("listColumnOrdersByCollection") private var collectionColumnOrdersRaw = "{}"
 
     // Cached filtered/sorted items (recomputed only when displayToken changes)
     @State private var displayItems: [Item] = []
@@ -342,6 +373,7 @@ struct ContentView: View {
     @State private var dropQueueRemaining = 0
     @State private var isPerformingFileOperation = false
     @State private var draggingShelfID: UUID? = nil
+    @State private var draggingListColumn: ItemSortKey?
     @State private var staticShelfOrderIDs: [UUID] = []
     @State private var smartShelfOrderIDs: [UUID] = []
     @State private var editingShelfID: UUID? = nil
@@ -1218,13 +1250,6 @@ struct ContentView: View {
     }
 
     // MARK: - List Columns (shared by the header and each row for alignment)
-    /// Canonical column order; the visible subset is filtered from this.
-    /// The title column is always shown and cannot be toggled off.
-    private static let columnOrder: [ItemSortKey] = [
-        .unread, .bookType, .title, .rating, .author, .genre,
-        .relation, .keywordA, .keywordB, .lastReadDate, .addedDate
-    ]
-
     /// Columns offered in the header right-click show/hide menu (title excluded).
     private static let toggleableColumns: [ItemSortKey] = [
         .unread, .bookType, .rating, .author, .genre,
@@ -1260,12 +1285,31 @@ struct ContentView: View {
         Set(listVisibleColumnsRaw.split(separator: ",").map(String.init))
     }
 
-    /// The currently visible columns, in canonical order (title always shown).
+    private var orderedColumnKeys: [ItemSortKey] {
+        let globalOrder = LibraryColumnOrder.decode(globalColumnOrderRaw)
+        guard !listColumnOrderAppliesGlobally else { return globalOrder }
+        let scope = LibraryColumnOrder.scopeKey(for: sidebarSelection)
+        return LibraryColumnOrder.decodeScoped(collectionColumnOrdersRaw)[scope] ?? globalOrder
+    }
+
+    /// The currently visible columns, in the persisted order (title always shown).
     private var listColumns: [LibraryListColumn] {
         let visible = visibleColumnKeys
-        return Self.columnOrder
+        return orderedColumnKeys
             .filter { $0 == .title || visible.contains($0.rawValue) }
             .map { LibraryListColumn(key: $0, title: $0.label, width: columnWidth($0), alignment: columnAlignment($0)) }
+    }
+
+    private func moveListColumn(_ source: ItemSortKey, across target: ItemSortKey) {
+        let moved = LibraryColumnOrder.moving(source, across: target, in: orderedColumnKeys)
+        guard moved != orderedColumnKeys else { return }
+        if listColumnOrderAppliesGlobally {
+            globalColumnOrderRaw = LibraryColumnOrder.encode(moved)
+        } else {
+            var orders = LibraryColumnOrder.decodeScoped(collectionColumnOrdersRaw)
+            orders[LibraryColumnOrder.scopeKey(for: sidebarSelection)] = moved
+            collectionColumnOrdersRaw = LibraryColumnOrder.encodeScoped(orders)
+        }
     }
 
     private func toggleColumn(_ key: ItemSortKey) {
@@ -1533,6 +1577,19 @@ struct ContentView: View {
                 .contextMenu {
                     headerContextMenu
                 }
+                .accessibilityHint("ドラッグしてカラムの位置を変更できます")
+                .onDrag {
+                    draggingListColumn = col.key
+                    return NSItemProvider(object: col.key.rawValue as NSString)
+                }
+                .onDrop(
+                    of: [.plainText],
+                    delegate: ListColumnDropDelegate(
+                        target: col.key,
+                        draggingColumn: $draggingListColumn,
+                        moveAction: moveListColumn(_:across:)
+                    )
+                )
             }
         }
         .padding(.horizontal, displayMetrics.space(10))
