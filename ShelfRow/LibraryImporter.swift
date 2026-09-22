@@ -149,8 +149,11 @@ actor LibraryImporter {
             
             // Check if item already exists (Merge Strategy)
             let existingItem: Item?
-            if let lid = legacyID, let item = existingItemsByLegacyID[lid] {
-                existingItem = item
+            if let lid = legacyID {
+                // Stackroom assigns a monotonically increasing identity. The
+                // same archive path may intentionally appear under a new ID, so
+                // path matching must never collapse two identified records.
+                existingItem = existingItemsByLegacyID[lid]
             } else if !relativePath.isEmpty, let item = existingItemsByPath[relativePath] {
                 existingItem = item
             } else {

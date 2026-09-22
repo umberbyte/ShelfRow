@@ -103,7 +103,9 @@ struct LibraryImporterTests {
                 "3": [
                     "ID": 3,
                     "Title": "差分追加",
-                    "Path": "/Volumes/Books/差分追加.zip",
+                    // Stackroom IDs are authoritative. A newly assigned ID must
+                    // be imported even when it points at an existing file.
+                    "Path": "/Volumes/Books/既存1.zip",
                     "Genre": "追加ジャンル",
                     "Neta": "追加関連",
                     "memo": "小文字のメモ"
