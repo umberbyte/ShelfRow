@@ -70,11 +70,6 @@ final class ThumbnailDistributionCoordinator {
         var hasRoom: Bool
     }
 
-    /// Above either of these, a fetch is announced rather than simply done. A
-    /// handful of covers after an edit on another Mac is not worth a dialog; a
-    /// gigabyte after a bulk regeneration is.
-    private static let quietFetchCount = 500
-    private static let quietFetchBytes = 100 * 1024 * 1024
     /// New covers generated here go up without ceremony while there are few of
     /// them. The library-sized case is the migration, which has its own button
     /// because it rewrites every record and iCloud carries all of it.
@@ -104,6 +99,8 @@ final class ThumbnailDistributionCoordinator {
     private var rootResolutionTask: Task<Void, Never>?
     private var automaticWorkTask: Task<Void, Never>?
     private var automaticPlanInProgress = false
+    private var isReplica = false
+    private var automaticFetchPolicy = AutomaticCoverFetchPolicy()
 
     private struct ResolvedRoot: Sendable {
         let url: URL
@@ -157,9 +154,10 @@ final class ThumbnailDistributionCoordinator {
 
     /// Called once the library store is open, and again after it is reopened in a
     /// different mode.
-    func attach(to container: ModelContainer, mode: LibraryMode) {
+    func attach(to container: ModelContainer, mode: LibraryMode, isReplica: Bool) {
         store = CoverDistributionStore(modelContainer: container)
         libraryMode = mode
+        self.isReplica = isReplica
         resolveRoot()
         // Root validation starts asynchronously. The library-sized inventory is
         // delayed until after the first window has had time to render.
@@ -487,6 +485,7 @@ final class ThumbnailDistributionCoordinator {
         // size here would mean two Macs had generated the same twenty thousand
         // covers, which the rules above are there to prevent.
         guard let plan = try? await store.automaticPlan(manifest: manifest) else { return }
+        guard !Task.isCancelled, isActive, !isRunning, autoFetchEnabled, pendingOffer == nil else { return }
 
         if !plan.uploads.isEmpty, plan.uploads.count <= Self.quietUploadCount {
             uploadEverything(targets: plan.uploads)
@@ -499,12 +498,19 @@ final class ThumbnailDistributionCoordinator {
             bytes: plan.fetches.reduce(0) { $0 + $1.expectedBytes }
         )
 
-        let quiet = hasBeenOfferedBulkFetch
-            && pending.count < Self.quietFetchCount
-            && pending.bytes < Self.quietFetchBytes
-        guard !quiet else {
+        switch automaticFetchPolicy.action(
+            isReplica: isReplica,
+            previouslyOffered: hasBeenOfferedBulkFetch,
+            count: pending.count,
+            bytes: pending.bytes
+        ) {
+        case .none:
+            return
+        case .fetch:
             fetchEverything(targets: plan.fetches)
             return
+        case .offer:
+            break
         }
 
         pendingOffer = BulkFetchOffer(

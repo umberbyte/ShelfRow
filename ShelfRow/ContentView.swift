@@ -1443,10 +1443,10 @@ struct ContentView: View {
         .onChange(of: displayToken) { _, _ in
             refreshDisplayItems()
         }
-        .onReceive(NotificationCenter.default.publisher(for: ModelContext.didSave)) { notification in
-            handleModelSave(notification)
+        .onReceive(LibraryNotifications.modelSaves()) { event in
+            handleModelSave(event)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange)) { _ in
+        .onReceive(LibraryNotifications.remoteChanges()) { _ in
             markLibrarySnapshotDirty()
             refreshDisplayItems()
             thumbnailDistribution.scheduleAutomaticWork()
@@ -1952,16 +1952,6 @@ struct ContentView: View {
         ].joined(separator: "|")
     }
 
-    private func identifiers(
-        in notification: Notification,
-        for key: ModelContext.NotificationKey
-    ) -> [PersistentIdentifier] {
-        let value = notification.userInfo?[key] ?? notification.userInfo?[key.rawValue]
-        if let identifiers = value as? Set<PersistentIdentifier> { return Array(identifiers) }
-        if let identifiers = value as? [PersistentIdentifier] { return identifiers }
-        return []
-    }
-
     private func isEntity(_ identifier: PersistentIdentifier, named name: String) -> Bool {
         identifier.entityName == name || identifier.entityName.hasSuffix(".\(name)")
     }
@@ -1970,21 +1960,20 @@ struct ContentView: View {
     /// A single Item update patches the cached value snapshot in place; inserts,
     /// deletes and Shelf changes rebuild because they can alter ordering or
     /// membership throughout the library.
-    private func handleModelSave(_ notification: Notification) {
+    private func handleModelSave(_ event: LibrarySaveEvent) {
         // ModelContext.didSave is process-wide. Ignore scratch/import/test stores:
         // their persistent identifiers cannot be resolved by this container and
         // are unrelated to the visible library in any case.
-        guard let savingContext = notification.object as? ModelContext,
-              savingContext.container === modelContext.container else { return }
+        guard event.containerID == ObjectIdentifier(modelContext.container) else { return }
 
-        let inserted = identifiers(in: notification, for: .insertedIdentifiers)
-        let updated = identifiers(in: notification, for: .updatedIdentifiers)
-        let deleted = identifiers(in: notification, for: .deletedIdentifiers)
-        let invalidated = identifiers(in: notification, for: .invalidatedAllIdentifiers)
+        let inserted = event.inserted
+        let updated = event.updated
+        let deleted = event.deleted
+        let invalidated = event.invalidated
         let allChanged = inserted + updated + deleted + invalidated
 
         guard !allChanged.isEmpty else {
-            if savingContext === modelContext {
+            if event.contextID == ObjectIdentifier(modelContext) {
                 markLibrarySnapshotDirty()
                 refreshDisplayItems()
             }

@@ -591,6 +591,50 @@ struct CloudSyncRetryTests {
 /// The NAS folder thumbnails are handed around through.
 struct ThumbnailDistributionTests {
 
+    @Test func primaryDeviceDoesNotOfferALibrarySizedDownload() {
+        var policy = AutomaticCoverFetchPolicy()
+        #expect(policy.action(isReplica: false, previouslyOffered: false,
+                              count: 19_022, bytes: 765_000_000) == .none)
+        #expect(policy.action(isReplica: false, previouslyOffered: true,
+                              count: 19_022, bytes: 765_000_000) == .none)
+        #expect(policy.action(isReplica: false, previouslyOffered: false,
+                              count: 2, bytes: 80_000) == .fetch)
+    }
+
+    @Test func replicaIsOfferedBulkFetchingOnlyOncePerLaunch() {
+        var policy = AutomaticCoverFetchPolicy()
+        #expect(policy.action(isReplica: true, previouslyOffered: false,
+                              count: 19_022, bytes: 765_000_000) == .offer)
+        // Deferring leaves the persisted flag false; accepting sets it true.
+        // Neither outcome should prompt again after a sync or transfer event.
+        #expect(policy.action(isReplica: true, previouslyOffered: false,
+                              count: 19_022, bytes: 765_000_000) == .none)
+        #expect(policy.action(isReplica: true, previouslyOffered: true,
+                              count: 19_022, bytes: 765_000_000) == .none)
+        var nextLaunch = AutomaticCoverFetchPolicy()
+        #expect(nextLaunch.action(isReplica: true, previouslyOffered: true,
+                                  count: 19_022, bytes: 765_000_000) == .offer)
+    }
+
+    @Test func smallReplicaTransfersRespectTheInitialChoiceAndBulkThresholds() {
+        var firstLaunch = AutomaticCoverFetchPolicy()
+        #expect(firstLaunch.action(isReplica: true, previouslyOffered: false,
+                                   count: 1, bytes: 100) == .offer)
+        #expect(firstLaunch.action(isReplica: true, previouslyOffered: false,
+                                   count: 1, bytes: 100) == .none)
+        var policy = AutomaticCoverFetchPolicy()
+        #expect(policy.action(isReplica: true, previouslyOffered: true,
+                              count: 499, bytes: 100) == .fetch)
+        #expect(policy.action(isReplica: true, previouslyOffered: true,
+                              count: 500, bytes: 100) == .offer)
+        var byteLimit = AutomaticCoverFetchPolicy()
+        #expect(byteLimit.action(isReplica: true, previouslyOffered: true,
+                                 count: 1, bytes: 100 * 1024 * 1024) == .offer)
+        var empty = AutomaticCoverFetchPolicy()
+        #expect(empty.action(isReplica: true, previouslyOffered: false,
+                             count: 0, bytes: 0) == .none)
+    }
+
     @Test func startupBackupIsThrottledForOneDay() {
         let now = Date(timeIntervalSince1970: 2_000_000)
         #expect(StoreFileBackup.needsStartupBackup(lastBackupDate: nil, now: now))

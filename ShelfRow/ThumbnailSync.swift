@@ -7,6 +7,28 @@ import Foundation
 import OSLog
 import SwiftData
 
+/// Bulk onboarding belongs to replicas. Remember presentation for this launch
+/// independently of the persisted choice, including when a transfer fails or
+/// the alert is dismissed before its button action runs.
+nonisolated struct AutomaticCoverFetchPolicy: Sendable {
+    enum Action: Sendable { case none, fetch, offer }
+    private var presentedOffer = false
+
+    mutating func action(
+        isReplica: Bool,
+        previouslyOffered: Bool,
+        count: Int,
+        bytes: Int
+    ) -> Action {
+        guard count > 0 else { return .none }
+        let isSmall = count < 500 && bytes < 100 * 1024 * 1024
+        if isSmall && (previouslyOffered || !isReplica) { return .fetch }
+        guard isReplica, !presentedOffer else { return .none }
+        presentedOffer = true
+        return .offer
+    }
+}
+
 /// What this device has to send or fetch, and what it has already.
 nonisolated struct CoverDistributionCounts: Sendable, Equatable {
     /// Thumbnails this device holds at the version the library asks for.
