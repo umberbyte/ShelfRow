@@ -1356,11 +1356,13 @@ struct ContentView: View {
             let startingWidth = Double(measuredWidth) / scale
             resize = ActiveColumnResize(key: key, startingWidth: startingWidth, width: startingWidth)
         }
-        let proposedWidth = resize.startingWidth + (Double(translation) / scale)
+        // The handle moves as the column is laid out, so DragGesture's local
+        // translation is opposite to the divider's visual movement.
+        let visualDelta = -(Double(translation) / scale)
         activeColumnResize = ActiveColumnResize(
             key: key,
             startingWidth: resize.startingWidth,
-            width: LibraryColumnWidth.clamped(proposedWidth, for: key)
+            width: LibraryColumnWidth.resized(resize.startingWidth, by: visualDelta, for: key)
         )
     }
 

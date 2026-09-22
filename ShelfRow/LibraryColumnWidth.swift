@@ -22,6 +22,10 @@ nonisolated enum LibraryColumnWidth {
         return min(max(width, minimum(for: key)), maximum)
     }
 
+    static func resized(_ startingWidth: Double, by visualDelta: Double, for key: ItemSortKey) -> Double {
+        clamped(startingWidth + visualDelta, for: key)
+    }
+
     static func decode(_ rawValue: String) -> Widths {
         guard let data = rawValue.data(using: .utf8),
               let stored = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }

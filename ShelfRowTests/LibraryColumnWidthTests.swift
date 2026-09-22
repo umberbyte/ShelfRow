@@ -19,6 +19,11 @@ struct LibraryColumnWidthTests {
         #expect(decoded[.rating] == LibraryColumnWidth.maximum)
     }
 
+    @Test func visualDragDirectionChangesWidthInTheSameDirection() {
+        #expect(LibraryColumnWidth.resized(200, by: 30, for: .title) == 230)
+        #expect(LibraryColumnWidth.resized(200, by: -30, for: .title) == 170)
+    }
+
     @Test func perCollectionWidthsRoundTripIndependently() {
         let shelfID = UUID()
         let widths: [String: LibraryColumnWidth.Widths] = [
