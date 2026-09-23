@@ -34,4 +34,16 @@ struct LibraryColumnOrderTests {
         #expect(decoded[LibraryColumnOrder.scopeKey(for: .shelf(shelfID))]?.prefix(2) == [.author, .title])
         #expect(decoded[LibraryColumnOrder.scopeKey(for: .unreadBooks)] == nil)
     }
+
+    @Test func nativeTableReorderPreservesHiddenColumnSlots() {
+        let complete: [ItemSortKey] = [.unread, .bookType, .title, .rating, .author, .genre]
+        let reorderedVisible: [ItemSortKey] = [.title, .unread, .author]
+
+        let merged = LibraryColumnOrder.mergingVisibleOrder(
+            reorderedVisible,
+            into: complete
+        )
+
+        #expect(merged == [.title, .bookType, .unread, .rating, .author, .genre])
+    }
 }

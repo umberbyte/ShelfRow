@@ -56,6 +56,27 @@ struct LibraryNotificationsTests {
         #expect(received == true)
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func remoteChangeBurstIsCoalescedBeforeRefreshingTheUI() async throws {
+        let center = NotificationCenter()
+        var deliveries = 0
+        let stream = AsyncStream<Void>.makeStream()
+        let subscription = LibraryNotifications.remoteChanges(center: center).sink {
+            deliveries += 1
+            stream.continuation.yield()
+        }
+        defer { subscription.cancel(); stream.continuation.finish() }
+
+        center.post(name: .NSPersistentStoreRemoteChange, object: nil)
+        center.post(name: .NSPersistentStoreRemoteChange, object: nil)
+        center.post(name: .NSPersistentStoreRemoteChange, object: nil)
+        var iterator = stream.stream.makeAsyncIterator()
+        _ = await iterator.next()
+        try await Task.sleep(for: .milliseconds(400))
+
+        #expect(deliveries == 1)
+    }
+
     @Test func saveSnapshotKeepsIdentifierSetsAndArrays() throws {
         let container = try ModelContainer(
             for: Schema(LibraryStore.libraryModels + LibraryStore.localModels),

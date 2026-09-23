@@ -337,6 +337,8 @@ struct ContentView: View {
     // Cached filtered/sorted items (recomputed only when displayToken changes)
     @State private var displayItems: [Item] = []
     @State private var displayRows: [LibraryDisplayRow] = []
+    @State private var displayListRows: [LibraryListRowSnapshot] = []
+    @State private var displayListGeneration: UInt64 = 0
     @State private var libraryItemCount = 0
     @State private var projectionTask: Task<Void, Never>?
     @State private var isUpdatingLibrary = false
@@ -1334,6 +1336,21 @@ struct ContentView: View {
         }
     }
 
+    private func persistVisibleColumnOrder(_ visibleOrder: [ItemSortKey]) {
+        let merged = LibraryColumnOrder.mergingVisibleOrder(
+            visibleOrder,
+            into: orderedColumnKeys
+        )
+        guard merged != orderedColumnKeys else { return }
+        if listColumnOrderAppliesGlobally {
+            globalColumnOrderRaw = LibraryColumnOrder.encode(merged)
+        } else {
+            var orders = LibraryColumnOrder.decodeScoped(collectionColumnOrdersRaw)
+            orders[LibraryColumnOrder.scopeKey(for: sidebarSelection)] = merged
+            collectionColumnOrdersRaw = LibraryColumnOrder.encodeScoped(orders)
+        }
+    }
+
     private func updateListColumnResize(
         _ key: ItemSortKey,
         measuredWidth: CGFloat,
@@ -1482,88 +1499,25 @@ struct ContentView: View {
                         }
                     }
                 } else {
-                    // List view: clickable column header + aligned rows
-                    listHeaderRow(columns: rowColumns)
-                    Divider()
-                    // Manual selection (reliable single-click) + manual keyboard
-                    // navigation. Use ScrollView/LazyVStack instead of List:
-                    // SwiftUI List on macOS still fights custom single/double
-                    // click gestures and made repeated key navigation sluggish
-                    // with large libraries.
-                    LibraryKeyboardScrollView(targetID: keyboardScrollTargetID, focus: $mainContentHasFocus) {
-                        LazyVStack(spacing: 0) {
-                            ForEach(displayRows) { row in
-                                let item = row.item
-                                let index = row.index
-                                LibraryListRow(
-                                    item: item,
-                                    isSelected: isItemSelected(item),
-                                    displayMetrics: displayMetrics,
-                                    columns: rowColumns,
-                                    typeNames: rowTypeNames,
-                                    onPrimaryClick: { modifiers in
-                                        selectItemFromPointer(item, modifiers: modifiers)
-                                    },
-                                    onDoubleClick: {
-                                        openItem(item)
-                                    }
-                                )
-                                    .frame(maxWidth: .infinity, minHeight: displayMetrics.size(30), alignment: .leading)
-                                    .padding(
-                                        .horizontal,
-                                        LibraryListLayout.rowInnerInset(displayMetrics)
-                                    )
-                                    .padding(.vertical, displayMetrics.rowSpace(5))
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 7)
-                                            .fill(
-                                                    isItemSelected(item)
-                                                        ? Color.accentColor.opacity(0.92)
-                                                        : (index.isMultiple(of: 2) ? alternateRowFillColor : rowFillColor)
-                                            )
-                                    )
-                                    .padding(
-                                        .horizontal,
-                                        LibraryListLayout.rowBackgroundInset(displayMetrics)
-                                    )
-                                    .padding(.vertical, displayMetrics.rowSpace(1))
-                                    .contentShape(Rectangle()) // full-row hit area
-                                    .id(item.id)
-                                    .contextMenu {
-                                        itemContextMenu(item)
-                                    }
-                                    .accessibilityElement(children: .combine)
-                                    .accessibilityLabel(item.title)
-                                    .accessibilityValue(isItemSelected(item) ? "選択中" : "未選択")
-                                    .accessibilityAddTraits(isItemSelected(item) ? .isSelected : [])
-                                    .accessibilityIdentifier("libraryRow-\(item.title)")
-                            }
-                        }
-                    }
+                    LibraryTableView(
+                        rows: displayListRows,
+                        rowsGeneration: displayListGeneration,
+                        columns: rowColumns,
+                        selectedIDs: selectedItemIDs,
+                        sortKey: sortKey,
+                        sortAscending: sortAscending,
+                        visibleColumnKeys: visibleColumnKeys,
+                        typeNames: rowTypeNames,
+                        displayMetrics: displayMetrics,
+                        onSelectionChange: applyTableSelection,
+                        onAction: performTableAction,
+                        onColumnOrderChange: persistVisibleColumnOrder,
+                        onColumnWidthChange: { key, width in
+                            persistListColumnWidth(width, for: key)
+                        },
+                        onDeleteSelection: deleteSelectedItemsFromKeyboard
+                    )
                     .background(modernSurfaceColor)
-                    .onKeyPress(.downArrow, phases: [.down, .repeat]) { press in
-                        moveSelection(by: 1, extending: press.modifiers.contains(.shift))
-                        return .handled
-                    }
-                    .onKeyPress(.upArrow, phases: [.down, .repeat]) { press in
-                        moveSelection(by: -1, extending: press.modifiers.contains(.shift))
-                        return .handled
-                    }
-                    .onKeyPress(.return) {
-                        if let item = selectedItem {
-                            openItem(item)
-                            return .handled
-                        }
-                        return .ignored
-                    }
-                    .onKeyPress(.delete) {
-                        deleteSelectedItemsFromKeyboard()
-                        return .handled
-                    }
-                    .onKeyPress(.deleteForward) {
-                        deleteSelectedItemsFromKeyboard()
-                        return .handled
-                    }
                 }
             }
         }
@@ -2184,18 +2138,22 @@ struct ContentView: View {
         let structuralChange = !(inserted + deleted + invalidated).filter {
             isEntity($0, named: itemName) || isEntity($0, named: shelfName)
         }.isEmpty || updated.contains { isEntity($0, named: shelfName) }
+        let updatedItemIdentifiers = updated.filter { isEntity($0, named: itemName) }
 
         libraryGeneration &+= 1
-        if structuralChange {
+        if LibraryRefreshPolicy.requiresFullSnapshot(
+            hasStructuralChange: structuralChange,
+            updatedItemCount: updatedItemIdentifiers.count,
+            relevantChangeCount: relevant.count
+        ) {
             requiresFullProjectionSnapshot = true
             pendingUpdatedItemIDs.removeAll()
         } else {
-            let changedItems = updated.compactMap { identifier -> UUID? in
-                guard isEntity(identifier, named: itemName),
-                      let item = modelContext.model(for: identifier) as? Item else { return nil }
+            let changedItems = updatedItemIdentifiers.compactMap { identifier -> UUID? in
+                guard let item = modelContext.model(for: identifier) as? Item else { return nil }
                 return item.id
             }
-            if changedItems.count == relevant.count {
+            if changedItems.count == updatedItemIdentifiers.count {
                 pendingUpdatedItemIDs.formUnion(changedItems)
             } else {
                 requiresFullProjectionSnapshot = true
@@ -2223,30 +2181,32 @@ struct ContentView: View {
                 let generation = libraryGeneration
 
                 if requiresFullProjectionSnapshot || snapshotGeneration == 0 {
-                    let source = allItems
-                    var values: [LibraryItemSnapshot] = []
+                    let snapshot = try await LibrarySnapshotLoader.read(
+                        modelContainer: modelContext.container
+                    )
+                    try Task.checkCancellation()
+                    guard generation == libraryGeneration else {
+                        isUpdatingLibrary = false
+                        refreshDisplayItems()
+                        return
+                    }
+
                     var models: [UUID: Item] = [:]
-                    var indices: [UUID: Int] = [:]
-                    values.reserveCapacity(source.count)
-                    models.reserveCapacity(source.count)
-                    indices.reserveCapacity(source.count)
-                    for (index, item) in source.enumerated() {
+                    models.reserveCapacity(allItems.count)
+                    for (index, item) in allItems.enumerated() {
                         try Task.checkCancellation()
-                        values.append(LibraryItemSnapshot(item))
                         models[item.id] = item
-                        indices[item.id] = index
-                        if index.isMultiple(of: 64) { await Task.yield() }
+                        if index.isMultiple(of: 128) { await Task.yield() }
                     }
-                    projectionItems = values
+                    projectionItems = snapshot.items
                     projectionModels = models
-                    projectionIndices = indices
-                    projectionShelves = shelves.map { shelf in
-                        LibraryShelfSnapshot(
-                            id: shelf.id,
-                            conditions: shelf.type == 1 ? SmartConditionsCodec.decode(shelf.smartConditionsJson) : nil,
-                            itemIDs: shelf.type == 1 ? [] : Set((shelf.items ?? []).map(\.id))
-                        )
+                    var snapshotIndices: [UUID: Int] = [:]
+                    snapshotIndices.reserveCapacity(snapshot.items.count)
+                    for (index, item) in snapshot.items.enumerated() {
+                        snapshotIndices[item.id] = index
                     }
+                    projectionIndices = snapshotIndices
+                    projectionShelves = snapshot.shelves
                     requiresFullProjectionSnapshot = false
                     pendingUpdatedItemIDs.removeAll()
                     snapshotGeneration = generation
@@ -2293,6 +2253,8 @@ struct ContentView: View {
                 let orderedItems = result.ids.compactMap { projectionModels[$0] }
                 displayItems = orderedItems
                 displayRows = orderedItems.enumerated().map { LibraryDisplayRow(id: $0.element.id, index: $0.offset, item: $0.element) }
+                displayListRows = result.listRows.filter { projectionModels[$0.id] != nil }
+                displayListGeneration &+= 1
                 libraryItemCount = projectionItems.count
                 hasLoadedLibrary = true
                 unreadCount = result.unreadCount
@@ -2425,8 +2387,61 @@ struct ContentView: View {
             lastKeyboardScrollIndex = selectedDisplayIndex
             prefetchNeighborCovers()
         }
-        if !mainContentHasFocus {
-            mainContentHasFocus = true
+    }
+
+    private func applyTableSelection(_ ids: Set<UUID>, primaryID: UUID?) {
+        selectedItemIDs = ids
+        selectedItemID = primaryID
+        selectionAnchorItemID = primaryID
+        selectedDisplayIndex = primaryID.flatMap { id in
+            displayItems.firstIndex { $0.id == id }
+        }
+        lastKeyboardScrollIndex = selectedDisplayIndex
+        if primaryID != nil {
+            prefetchNeighborCovers()
+        }
+    }
+
+    private func performTableAction(_ action: LibraryTableAction) {
+        switch action {
+        case .sort(let key):
+            applySort(key)
+        case .toggleColumn(let key):
+            toggleColumn(key)
+        case .startSlideshow(let id):
+            if let item = projectionModels[id] { startSlideshow(item) }
+        case .open(let id):
+            if let item = projectionModels[id] { openItem(item) }
+        case .delete(let id):
+            if let item = projectionModels[id] { deleteItem(item, trashFile: false) }
+        case .trash(let id):
+            if let item = projectionModels[id] { deleteItem(item, trashFile: true) }
+        case .setRating(let id, let rating):
+            guard let item = projectionModels[id], item.rating != rating else { return }
+            item.rating = rating
+            try? modelContext.save()
+        case .setBookType(let id, let type):
+            guard let item = projectionModels[id], item.bookType != type else { return }
+            item.bookType = type
+            try? modelContext.save()
+        case .toggleUnread(let id):
+            guard let item = projectionModels[id] else { return }
+            item.isUnread.toggle()
+            try? modelContext.save()
+        case .revealInFinder(let id):
+            if let item = projectionModels[id] { revealInFinder(item) }
+        case .moveFile(let id):
+            if let item = projectionModels[id] { moveItemFile(item) }
+        case .renameFile(let id):
+            if let item = projectionModels[id] { renameItemFile(item) }
+        case .editCover(let id):
+            guard projectionModels[id] != nil else { return }
+            selectedItemID = id
+            selectedItemIDs = [id]
+            selectionAnchorItemID = id
+            showCoverEditor = true
+        case .reassignFile(let id):
+            if let item = projectionModels[id] { reassignItemFile(item) }
         }
     }
 

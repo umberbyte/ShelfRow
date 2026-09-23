@@ -40,6 +40,21 @@ nonisolated enum LibraryColumnOrder {
         return result
     }
 
+    /// NSTableView reports only the order of visible columns. Keep hidden
+    /// columns in their existing slots so showing one again is predictable.
+    static func mergingVisibleOrder(
+        _ visibleOrder: [ItemSortKey],
+        into completeOrder: [ItemSortKey]
+    ) -> [ItemSortKey] {
+        let visibleSet = Set(visibleOrder)
+        guard visibleOrder.count == visibleSet.count,
+              visibleSet.isSubset(of: Set(completeOrder)) else { return completeOrder }
+        var iterator = visibleOrder.makeIterator()
+        return completeOrder.map { key in
+            visibleSet.contains(key) ? (iterator.next() ?? key) : key
+        }
+    }
+
     static func scopeKey(for selection: SidebarSelection?) -> String {
         switch selection {
         case .allBooks, .none: "library.all"

@@ -173,11 +173,23 @@ struct SmartConditions: Equatable, Sendable {
         var field: String = "Title" // Title / Author / Genre / Relation / Keyword A / Keyword B / Neta
         var text: String = ""
         var mode: Int = 0           // 0 = contains, 1 = not contains, 2 = equals
+
+        nonisolated init(field: String = "Title", text: String = "", mode: Int = 0) {
+            self.field = field
+            self.text = text
+            self.mode = mode
+        }
     }
     struct DateCondition: Equatable, Sendable {
         var field: Int = 0          // 0 = 登録した日, 1 = 最後に読んだ日
         var days: Int = 30
         var mode: Int = 0           // 0 = 日以内, 1 = 日以上前
+
+        nonisolated init(field: Int = 0, days: Int = 30, mode: Int = 0) {
+            self.field = field
+            self.days = days
+            self.mode = mode
+        }
     }
 
     var keyword: Keyword? = nil
@@ -185,13 +197,27 @@ struct SmartConditions: Equatable, Sendable {
     var types: Set<Int>? = nil      // selected bookType indices, nil = ALL
     var rates: Set<Int>? = nil      // selected ratings 1...5, nil = ALL
     var unreadOnly: Bool = false
+
+    nonisolated init(
+        keyword: Keyword? = nil,
+        date: DateCondition? = nil,
+        types: Set<Int>? = nil,
+        rates: Set<Int>? = nil,
+        unreadOnly: Bool = false
+    ) {
+        self.keyword = keyword
+        self.date = date
+        self.types = types
+        self.rates = rates
+        self.unreadOnly = unreadOnly
+    }
 }
 
 enum SmartConditionsCodec {
 
     /// Decodes a JSON conditions string. Tolerates both the legacy imported
     /// dictionaries and the ones produced by `encode`.
-    static func decode(_ json: String?) -> SmartConditions {
+    nonisolated static func decode(_ json: String?) -> SmartConditions {
         var result = SmartConditions()
         guard let json,
               let data = json.data(using: .utf8),

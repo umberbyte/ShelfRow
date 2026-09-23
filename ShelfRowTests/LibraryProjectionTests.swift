@@ -3,6 +3,7 @@ import Testing
 import OSLog
 import AppKit
 import ImageIO
+import SwiftData
 @testable import ShelfRow
 
 @MainActor
@@ -117,5 +118,85 @@ struct LibraryProjectionTests {
         #expect(reverse.ids == rows.reversed().map(\.id))
         #expect(result.unreadCount == 10_000)
         Logger(subsystem: "com.eureka.ShelfRow", category: "PerformanceTests").notice("20k projection cold=\(String(describing: cold), privacy: .public) warm=\(String(describing: warm), privacy: .public)")
+    }
+
+    @Test func cloudSyncBurstsSkipMainContextIdentifierResolution() {
+        #expect(!LibraryRefreshPolicy.requiresFullSnapshot(
+            hasStructuralChange: false,
+            updatedItemCount: LibraryRefreshPolicy.maximumPatchedItems,
+            relevantChangeCount: LibraryRefreshPolicy.maximumPatchedItems
+        ))
+        #expect(LibraryRefreshPolicy.requiresFullSnapshot(
+            hasStructuralChange: false,
+            updatedItemCount: LibraryRefreshPolicy.maximumPatchedItems + 1,
+            relevantChangeCount: LibraryRefreshPolicy.maximumPatchedItems + 1
+        ))
+        #expect(LibraryRefreshPolicy.requiresFullSnapshot(
+            hasStructuralChange: true,
+            updatedItemCount: 1,
+            relevantChangeCount: 1
+        ))
+        #expect(LibraryRefreshPolicy.requiresFullSnapshot(
+            hasStructuralChange: false,
+            updatedItemCount: 1,
+            relevantChangeCount: 2
+        ))
+    }
+
+    @Test func snapshotReaderReturnsValueCopiesFromItsModelActor() async throws {
+        let schema = Schema(LibraryStore.libraryModels)
+        let configuration = ModelConfiguration(
+            "Library",
+            schema: schema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: schema, configurations: configuration)
+        let item = Item(relativePath: "book.zip", title: "同期中も表示できる本", author: "作者")
+        let shelf = Shelf(title: "本棚", icon: 0, type: 0)
+        shelf.items = [item]
+        container.mainContext.insert(item)
+        container.mainContext.insert(shelf)
+        try container.mainContext.save()
+
+        let payload = try await LibrarySnapshotReader(modelContainer: container).read()
+
+        #expect(payload.items == [LibraryItemSnapshot(item)])
+        #expect(payload.shelves == [LibraryShelfSnapshot(id: shelf.id, conditions: nil, itemIDs: [item.id])])
+    }
+
+    @Test func snapshotReaderIsCreatedAwayFromTheMainThread() async throws {
+        let schema = Schema(LibraryStore.libraryModels)
+        let configuration = ModelConfiguration(
+            "Library",
+            schema: schema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(for: schema, configurations: configuration)
+
+        let reader = await LibrarySnapshotLoader.makeReader(modelContainer: container)
+        let isMainThread = await reader.isExecutingOnMainThread()
+
+        #expect(isMainThread == false)
+    }
+
+    @Test func listRowsKeepProjectionOrderAndPreformatDates() {
+        let first = LibraryItemSnapshot(
+            Item(relativePath: "1", title: "First", addedDate: Date(timeIntervalSince1970: 0))
+        )
+        let second = LibraryItemSnapshot(
+            Item(relativePath: "2", title: "Second", lastReadDate: Date(timeIntervalSince1970: 86_400))
+        )
+
+        let rows = LibraryListSnapshot.rows(
+            orderedIDs: [second.id, first.id],
+            snapshots: [first, second]
+        )
+
+        #expect(rows.map(\.id) == [second.id, first.id])
+        #expect(rows[0].lastReadDateText != "—")
+        #expect(rows[1].lastReadDateText == "—")
+        #expect(!rows[0].addedDateText.isEmpty)
     }
 }

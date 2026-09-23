@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import OSLog
+import SwiftData
 import SwiftUI
 
 /// IDs are captured once per result, avoiding managed-property reads during
@@ -35,14 +36,60 @@ struct LibraryItemSnapshot: Sendable, Equatable {
     let isUnread: Bool
     let addedDate: Date
     let lastReadDate: Date?
+    let addedDateText: String
+    let lastReadDateText: String
 
     @MainActor init(_ item: Item) {
-        id = item.id
-        title = item.title; author = item.author; genre = item.genre
-        relation = item.relation; keywordA = item.keywordA; keywordB = item.keywordB
-        memo = item.memo; rating = item.rating; bookType = item.bookType
-        pages = item.pages; isUnread = item.isUnread
-        addedDate = item.addedDate; lastReadDate = item.lastReadDate
+        self.init(
+            id: item.id,
+            title: item.title,
+            author: item.author,
+            genre: item.genre,
+            relation: item.relation,
+            keywordA: item.keywordA,
+            keywordB: item.keywordB,
+            memo: item.memo,
+            rating: item.rating,
+            bookType: item.bookType,
+            pages: item.pages,
+            isUnread: item.isUnread,
+            addedDate: item.addedDate,
+            lastReadDate: item.lastReadDate
+        )
+    }
+
+    nonisolated init(
+        id: UUID,
+        title: String,
+        author: String,
+        genre: String,
+        relation: String,
+        keywordA: String,
+        keywordB: String,
+        memo: String,
+        rating: Int,
+        bookType: Int,
+        pages: Int,
+        isUnread: Bool,
+        addedDate: Date,
+        lastReadDate: Date?
+    ) {
+        self.id = id
+        self.title = title
+        self.author = author
+        self.genre = genre
+        self.relation = relation
+        self.keywordA = keywordA
+        self.keywordB = keywordB
+        self.memo = memo
+        self.rating = rating
+        self.bookType = bookType
+        self.pages = pages
+        self.isUnread = isUnread
+        self.addedDate = addedDate
+        self.lastReadDate = lastReadDate
+        self.addedDateText = addedDate.formatted(date: .numeric, time: .omitted)
+        self.lastReadDateText = lastReadDate?.formatted(date: .numeric, time: .omitted) ?? "—"
     }
 
     nonisolated func value(for field: KeywordEquivalenceField) -> String {
@@ -63,6 +110,151 @@ struct LibraryShelfSnapshot: Sendable, Equatable {
     let itemIDs: Set<UUID>
 }
 
+struct LibrarySnapshotPayload: Sendable, Equatable {
+    let items: [LibraryItemSnapshot]
+    let shelves: [LibraryShelfSnapshot]
+}
+
+struct LibraryListRowSnapshot: Identifiable, Sendable, Equatable {
+    let id: UUID
+    let title: String
+    let author: String
+    let genre: String
+    let relation: String
+    let keywordA: String
+    let keywordB: String
+    let rating: Int
+    let bookType: Int
+    let pages: Int
+    let isUnread: Bool
+    let addedDateText: String
+    let lastReadDateText: String
+
+    nonisolated init(_ item: LibraryItemSnapshot) {
+        id = item.id
+        title = item.title
+        author = item.author
+        genre = item.genre
+        relation = item.relation
+        keywordA = item.keywordA
+        keywordB = item.keywordB
+        rating = item.rating
+        bookType = item.bookType
+        pages = item.pages
+        isUnread = item.isUnread
+        addedDateText = item.addedDateText
+        lastReadDateText = item.lastReadDateText
+    }
+}
+
+nonisolated enum LibraryListSnapshot {
+    static func rows(
+        orderedIDs: [UUID],
+        snapshots: [LibraryItemSnapshot]
+    ) -> [LibraryListRowSnapshot] {
+        var byID: [UUID: LibraryItemSnapshot] = [:]
+        byID.reserveCapacity(snapshots.count)
+        for snapshot in snapshots {
+            byID[snapshot.id] = snapshot
+        }
+        return orderedIDs.compactMap { id in
+            byID[id].map(LibraryListRowSnapshot.init)
+        }
+    }
+}
+
+/// Reads the CloudKit-backed store on its own actor executor. A remote import can
+/// fault thousands of fields at once; doing that through ContentView's main
+/// context makes pointer movement and scrolling wait behind SQLite.
+actor LibrarySnapshotReader {
+    private let modelContext: ModelContext
+
+    init(modelContainer: ModelContainer) {
+        self.modelContext = ModelContext(modelContainer)
+    }
+
+    func read() async throws -> LibrarySnapshotPayload {
+        let models = try modelContext.fetch(FetchDescriptor<Item>())
+        var items: [LibraryItemSnapshot] = []
+        items.reserveCapacity(models.count)
+        for (index, item) in models.enumerated() {
+            try Task.checkCancellation()
+            items.append(
+                LibraryItemSnapshot(
+                    id: item.id,
+                    title: item.title,
+                    author: item.author,
+                    genre: item.genre,
+                    relation: item.relation,
+                    keywordA: item.keywordA,
+                    keywordB: item.keywordB,
+                    memo: item.memo,
+                    rating: item.rating,
+                    bookType: item.bookType,
+                    pages: item.pages,
+                    isUnread: item.isUnread,
+                    addedDate: item.addedDate,
+                    lastReadDate: item.lastReadDate
+                )
+            )
+            if index.isMultiple(of: 256) { await Task.yield() }
+        }
+
+        let shelfModels = try modelContext.fetch(FetchDescriptor<Shelf>())
+        var shelves: [LibraryShelfSnapshot] = []
+        shelves.reserveCapacity(shelfModels.count)
+        for shelf in shelfModels {
+            try Task.checkCancellation()
+            shelves.append(
+                LibraryShelfSnapshot(
+                    id: shelf.id,
+                    conditions: shelf.type == 1
+                        ? SmartConditionsCodec.decode(shelf.smartConditionsJson)
+                        : nil,
+                    itemIDs: shelf.type == 1 ? [] : Set((shelf.items ?? []).map(\.id))
+                )
+            )
+        }
+        return LibrarySnapshotPayload(items: items, shelves: shelves)
+    }
+
+    nonisolated func isExecutingOnMainThread() async -> Bool {
+        await executionThreadIsMain()
+    }
+
+    private func executionThreadIsMain() -> Bool {
+        Thread.isMainThread
+    }
+}
+
+nonisolated enum LibrarySnapshotLoader {
+    @concurrent
+    nonisolated static func makeReader(modelContainer: ModelContainer) async -> LibrarySnapshotReader {
+        await Task.yield()
+        return LibrarySnapshotReader(modelContainer: modelContainer)
+    }
+
+    nonisolated static func read(modelContainer: ModelContainer) async throws -> LibrarySnapshotPayload {
+        let reader = await makeReader(modelContainer: modelContainer)
+        try Task.checkCancellation()
+        return try await reader.read()
+    }
+}
+
+nonisolated enum LibraryRefreshPolicy {
+    static let maximumPatchedItems = 128
+
+    static func requiresFullSnapshot(
+        hasStructuralChange: Bool,
+        updatedItemCount: Int,
+        relevantChangeCount: Int
+    ) -> Bool {
+        hasStructuralChange
+            || updatedItemCount != relevantChangeCount
+            || updatedItemCount > maximumPatchedItems
+    }
+}
+
 struct LibraryProjectionRequest: Sendable {
     let selection: SidebarSelection?
     let search: String
@@ -76,6 +268,7 @@ struct LibraryProjectionRequest: Sendable {
 
 struct LibraryProjectionResult: Sendable {
     let ids: [UUID]
+    let listRows: [LibraryListRowSnapshot]
     let unreadCount: Int
     let shelfCounts: [UUID: Int]
 }
@@ -127,7 +320,7 @@ actor LibraryProjectionWorker {
         }
         var counts = statisticsChanged ? [:] : cachedCounts
         var unread = statisticsChanged ? 0 : cachedUnread
-        var visible: [UUID] = []
+        var visible: [LibraryListRowSnapshot] = []
         visible.reserveCapacity(items.count)
         let selectedShelf = shelves.first { request.selection == .shelf($0.id) }
         for item in sortedItems {
@@ -173,7 +366,7 @@ actor LibraryProjectionWorker {
                 }
                 if !textMatches && !aliasMatches { continue }
             }
-            visible.append(item.id)
+            visible.append(LibraryListRowSnapshot(item))
         }
         try Task.checkCancellation()
         cachedGeneration = generation
@@ -182,7 +375,12 @@ actor LibraryProjectionWorker {
         cachedCounts = counts
         if !request.ascending { visible.reverse() }
         logger.debug("Projected \(items.count) items in \(String(describing: start.duration(to: .now)), privacy: .public)")
-        return LibraryProjectionResult(ids: visible, unreadCount: unread, shelfCounts: counts)
+        return LibraryProjectionResult(
+            ids: visible.map(\.id),
+            listRows: visible,
+            unreadCount: unread,
+            shelfCounts: counts
+        )
     }
 
     nonisolated private static func compare(_ a: LibraryItemSnapshot, _ b: LibraryItemSnapshot,

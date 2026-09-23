@@ -18,14 +18,18 @@ final class LibraryKeyboardNavigationUITests: XCTestCase {
         }
 
         func row(_ number: Int) -> XCUIElement {
-            app.descendants(matching: .any).matching(identifier: String(format: "libraryRow-Keyboard row %02d", number)).firstMatch
+            app.tables["libraryTable"].tableRows.element(boundBy: number)
         }
-        func expectSelection(_ number: Int) {
+        let table = app.tables["libraryTable"]
+        func expectSelection(_ number: Int) -> Bool {
             let element = row(number)
             let selected = NSPredicate(format: "selected == true")
             let expectation = XCTNSPredicateExpectation(predicate: selected, object: element)
-            XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed, "Selection should reach row \(number)")
-            XCTAssertTrue(element.isHittable, "Selected row must remain visible")
+            let selectedResult = XCTWaiter.wait(for: [expectation], timeout: 5) == .completed
+            XCTAssertTrue(selectedResult, "Selection should reach row \(number)")
+            let visible = element.isHittable
+            XCTAssertTrue(visible, "Selected row must remain visible")
+            return selectedResult && visible
         }
 
         guard row(0).waitForExistence(timeout: 10) else {
@@ -36,15 +40,17 @@ final class LibraryKeyboardNavigationUITests: XCTestCase {
             return
         }
         row(0).click()
-        expectSelection(0)
+        guard expectSelection(0) else { return }
         // More rows than the viewport can hold, then extra presses at the end.
-        for _ in 0..<45 { app.typeKey(.downArrow, modifierFlags: []) }
-        expectSelection(35)
-        app.typeKey(.upArrow, modifierFlags: [])
-        expectSelection(34)
-        for _ in 0..<45 { app.typeKey(.upArrow, modifierFlags: []) }
-        expectSelection(0)
-        app.typeKey(.downArrow, modifierFlags: [])
-        expectSelection(1)
+        table.typeKey(.downArrow, modifierFlags: [])
+        guard expectSelection(1) else { return }
+        for _ in 0..<44 { table.typeKey(.downArrow, modifierFlags: []) }
+        guard expectSelection(35) else { return }
+        table.typeKey(.upArrow, modifierFlags: [])
+        guard expectSelection(34) else { return }
+        for _ in 0..<45 { table.typeKey(.upArrow, modifierFlags: []) }
+        guard expectSelection(0) else { return }
+        table.typeKey(.downArrow, modifierFlags: [])
+        _ = expectSelection(1)
     }
 }

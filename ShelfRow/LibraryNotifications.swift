@@ -40,6 +40,9 @@ nonisolated enum LibraryNotifications {
     static func remoteChanges(center: NotificationCenter = .default) -> AnyPublisher<Void, Never> {
         center.publisher(for: .NSPersistentStoreRemoteChange)
             .map { _ in () }
+            // CloudKit imports arrive in bursts. One refresh after the burst is
+            // enough and avoids repeatedly invalidating a library-sized view.
+            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
             .receive(on: DispatchQueue.main)
             .eraseToAnyPublisher()
     }
