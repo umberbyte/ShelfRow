@@ -24,6 +24,18 @@ struct LibraryColumnWidthTests {
         #expect(LibraryColumnWidth.resized(200, by: -30, for: .title) == 170)
     }
 
+    @Test func compactValueColumnsUseFixedWidthsThatFitTheirContents() {
+        let fixed: [ItemSortKey] = [.rating, .addedDate, .lastReadDate, .bookType, .unread]
+
+        #expect(fixed.allSatisfy { !LibraryColumnWidth.isResizable($0) })
+        #expect(fixed.allSatisfy {
+            guard let width = LibraryColumnWidth.defaultWidth(for: $0) else { return false }
+            return width >= LibraryColumnWidth.minimum(for: $0)
+        })
+        #expect(LibraryColumnWidth.isResizable(.title))
+        #expect(LibraryColumnWidth.isResizable(.author))
+    }
+
     @Test func perCollectionWidthsRoundTripIndependently() {
         let shelfID = UUID()
         let widths: [String: LibraryColumnWidth.Widths] = [

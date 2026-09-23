@@ -1267,20 +1267,8 @@ struct ContentView: View {
     ]
 
     private func defaultColumnWidth(_ key: ItemSortKey) -> CGFloat? {
-        switch key {
-        case .unread:       return displayMetrics.size(38)
-        case .bookType:     return displayMetrics.size(38)
-        case .title:        return nil   // flexible
-        case .rating:       return displayMetrics.size(92)
-        case .author:       return displayMetrics.size(120)
-        case .genre:        return displayMetrics.size(90)
-        case .relation:     return displayMetrics.size(90)
-        case .keywordA:     return displayMetrics.size(100)
-        case .keywordB:     return displayMetrics.size(100)
-        case .lastReadDate: return displayMetrics.size(84)
-        case .addedDate:    return displayMetrics.size(84)
-        case .pages:        return displayMetrics.size(56)
-        }
+        guard let width = LibraryColumnWidth.defaultWidth(for: key) else { return nil }
+        return displayMetrics.size(CGFloat(width))
     }
 
     private var storedColumnWidths: LibraryColumnWidth.Widths {
@@ -1295,6 +1283,9 @@ struct ContentView: View {
     }
 
     private func columnWidth(_ key: ItemSortKey) -> CGFloat? {
+        if !LibraryColumnWidth.isResizable(key) {
+            return defaultColumnWidth(key)
+        }
         if let activeColumnResize, activeColumnResize.key == key {
             return CGFloat(activeColumnResize.width * columnWidthDisplayScale)
         }
@@ -1665,48 +1656,54 @@ struct ContentView: View {
                     headerContextMenu
                 }
                 .overlay {
-                    GeometryReader { geometry in
-                        HStack(spacing: 0) {
-                            Spacer(minLength: 0)
-                            Color.clear
-                                .frame(width: 8)
-                                .contentShape(Rectangle())
-                                .overlay {
-                                    Rectangle()
-                                        .fill(
-                                            activeColumnResize?.key == col.key
-                                                ? Color.accentColor.opacity(0.9)
-                                                : separatorTintColor.opacity(0.55)
-                                        )
-                                        .frame(width: activeColumnResize?.key == col.key ? 2 : 1)
-                                        .allowsHitTesting(false)
-                                }
-                                .onHover { hovering in
-                                    if hovering {
-                                        NSCursor.resizeLeftRight.set()
-                                    } else {
-                                        NSCursor.arrow.set()
-                                    }
-                                }
-                                .highPriorityGesture(
-                                    DragGesture(minimumDistance: 1)
-                                        .onChanged { value in
-                                            updateListColumnResize(
-                                                col.key,
-                                                measuredWidth: geometry.size.width,
-                                                translation: value.translation.width
+                    if LibraryColumnWidth.isResizable(col.key) {
+                        GeometryReader { geometry in
+                            HStack(spacing: 0) {
+                                Spacer(minLength: 0)
+                                Color.clear
+                                    .frame(width: 8)
+                                    .contentShape(Rectangle())
+                                    .overlay {
+                                        Rectangle()
+                                            .fill(
+                                                activeColumnResize?.key == col.key
+                                                    ? Color.accentColor.opacity(0.9)
+                                                    : separatorTintColor.opacity(0.55)
                                             )
+                                            .frame(width: activeColumnResize?.key == col.key ? 2 : 1)
+                                            .allowsHitTesting(false)
+                                    }
+                                    .onHover { hovering in
+                                        if hovering {
+                                            NSCursor.resizeLeftRight.set()
+                                        } else {
+                                            NSCursor.arrow.set()
                                         }
-                                        .onEnded { _ in
-                                            finishListColumnResize(col.key)
-                                        }
-                                )
-                                .accessibilityLabel("\(col.title)カラムの幅")
-                                .accessibilityHint("左右にドラッグして幅を変更できます")
+                                    }
+                                    .highPriorityGesture(
+                                        DragGesture(minimumDistance: 1)
+                                            .onChanged { value in
+                                                updateListColumnResize(
+                                                    col.key,
+                                                    measuredWidth: geometry.size.width,
+                                                    translation: value.translation.width
+                                                )
+                                            }
+                                            .onEnded { _ in
+                                                finishListColumnResize(col.key)
+                                            }
+                                    )
+                                    .accessibilityLabel("\(col.title)カラムの幅")
+                                    .accessibilityHint("左右にドラッグして幅を変更できます")
+                            }
                         }
                     }
                 }
-                .accessibilityHint("ドラッグで位置を変更し、右端をドラッグして幅を変更できます")
+                .accessibilityHint(
+                    LibraryColumnWidth.isResizable(col.key)
+                        ? "ドラッグで位置を変更し、右端をドラッグして幅を変更できます"
+                        : "ドラッグしてカラムの位置を変更できます"
+                )
                 .onDrag {
                     draggingListColumn = col.key
                     return NSItemProvider(object: col.key.rawValue as NSString)

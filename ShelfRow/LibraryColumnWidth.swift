@@ -6,6 +6,26 @@ nonisolated enum LibraryColumnWidth {
     typealias Widths = [ItemSortKey: Double]
 
     static let maximum = 1_200.0
+    static let fixedColumns: Set<ItemSortKey> = [
+        .rating, .addedDate, .lastReadDate, .bookType, .unread
+    ]
+
+    static func isResizable(_ key: ItemSortKey) -> Bool {
+        !fixedColumns.contains(key)
+    }
+
+    static func defaultWidth(for key: ItemSortKey) -> Double? {
+        switch key {
+        case .unread, .bookType: 44
+        case .title: nil
+        case .rating: 92
+        case .author: 120
+        case .genre, .relation: 90
+        case .keywordA, .keywordB: 100
+        case .lastReadDate, .addedDate: 96
+        case .pages: 56
+        }
+    }
 
     static func minimum(for key: ItemSortKey) -> Double {
         switch key {
