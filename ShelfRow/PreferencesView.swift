@@ -8,6 +8,7 @@
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
+import OSLog
 
 enum MaintenanceAction: String {
     case manageVolumes
@@ -920,6 +921,8 @@ struct CloudSyncSettingsView: View {
     @State private var isConfirmingDisable = false
     @State private var isConfirmingPurge = false
     @State private var isConfirmingResend = false
+    @State private var isConfirmingDuplicateResolution = false
+    @State private var duplicatePreview = DuplicateRecordSummary.empty
 
     /// The switch says what the user wants; the mode says what the library is
     /// actually doing. They differ whenever iCloud is signed out, which is the
@@ -1081,6 +1084,38 @@ struct CloudSyncSettingsView: View {
             if !libraryStore.isReplica {
                 PreferencesPanel {
                     PreferencesSettingRow(
+                        icon: "square.on.square.dashed",
+                        title: "重複レコードを解消",
+                        description: "同じStackroom ID、またはIDがなく同じボリューム上の同じパスを持つ本だけを統合します。シェルフ所属や入力済みの情報は代表レコードへ引き継ぎます。"
+                    ) {
+                        if libraryStore.isResolvingDuplicates {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                        } else {
+                            Button("重複を確認…") {
+                                Task {
+                                    guard let summary = await libraryStore.inspectDuplicateRecords(),
+                                          summary.duplicateCount > 0 else { return }
+                                    duplicatePreview = summary
+                                    isConfirmingDuplicateResolution = true
+                                }
+                            }
+                            .font(PreferencesLayout.bodyFont)
+                            .disabled(libraryStore.blockingTask != nil)
+                        }
+                    }
+                }
+
+                if let duplicateOutcome = libraryStore.duplicateResolutionMessage {
+                    Text(duplicateOutcome)
+                        .font(PreferencesLayout.smallCaptionFont)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                PreferencesPanel {
+                    PreferencesSettingRow(
                         icon: "trash",
                         title: "iCloudのデータを削除",
                         description: "このアプリがiCloudに保存している書誌情報をすべて消し、使用しているiCloudの容量を解放します。この端末の蔵書・サムネイル・設定は残ります。"
@@ -1173,6 +1208,18 @@ struct CloudSyncSettingsView: View {
                 件数が多いと送信には時間がかかります。準備中はアプリの動作が重くなることがあります。
                 他の端末で受け取るには、送信が終わってから「iCloudの蔵書で置き換える」を実行してください。
                 """)
+        }
+        .confirmationDialog(
+            "重複レコードを解消しますか？",
+            isPresented: $isConfirmingDuplicateResolution,
+            titleVisibility: .visible
+        ) {
+            Button("重複を解消", role: .destructive) {
+                Task { await libraryStore.resolveDuplicateRecords() }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("\(duplicatePreview.groupCount.formatted())組に含まれる重複\(duplicatePreview.duplicateCount.formatted())件を統合します。実行前にデータベースをバックアップします。異なるStackroom IDの本は、同じファイルを指していても統合しません。")
         }
         .confirmationDialog(
             "iCloudのデータをすべて削除しますか？",
@@ -1282,6 +1329,11 @@ struct SecuritySettingsView: View {
 
 // MARK: - 6. Maintenance Pane
 struct MaintenanceSettingsView: View {
+    private static let logger = Logger(
+        subsystem: ThumbnailCache.appIdentifier,
+        category: "Maintenance"
+    )
+
     @Environment(ThumbnailDistributionCoordinator.self) private var thumbnails
     @Environment(LibraryStore.self) private var libraryStore
     @Query private var volumes: [Volume]
@@ -1293,6 +1345,7 @@ struct MaintenanceSettingsView: View {
     @State private var isBackingUp = false
     @State private var isRestoring = false
     @State private var showRestoreConfirmation = false
+    @State private var showClientDataResetConfirmation = false
     @State private var backupStatusMessage = ""
 
     var body: some View {
@@ -1333,8 +1386,63 @@ struct MaintenanceSettingsView: View {
                     action: .repairEmptyTitles
                 )
             }
+
+            dangerSection
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var dangerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("危険")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.red)
+
+            PreferencesPanel {
+                PreferencesSettingRow(
+                    icon: "exclamationmark.triangle.fill",
+                    title: "データベースとキャッシュのクリア",
+                    description: "このMac上のSQLiteデータベース、端末固有データ、内部バックアップ、サムネイルを含むキャッシュをすべて消去します。"
+                ) {
+                    Button("データベースとキャッシュをクリア…") {
+                        showClientDataResetConfirmation = true
+                    }
+                    .controlSize(.large)
+                    .disabled(
+                        isBackingUp || isRestoring || thumbnails.isRunning
+                            || libraryStore.blockingTask != nil
+                    )
+                }
+            }
+        }
+        .alert(
+            "データベースとキャッシュをクリアしますか？",
+            isPresented: $showClientDataResetConfirmation
+        ) {
+            Button("実行", role: .destructive) {
+                if libraryStore.requestClientDataReset() {
+                    relaunchForClientDataReset()
+                }
+            }
+            Button("キャンセル", role: .cancel) { }
+        } message: {
+            Text("このMac上のShelfRowデータは元に戻せません。必要な場合は、キャンセルして先に上の「今すぐバックアップ」を実行してください。iCloud上のデータと外部のバックアップ、NAS上のサムネイル配布元は削除されません。実行するとShelfRowを再起動します。")
+        }
+    }
+
+    private func relaunchForClientDataReset() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL,
+            configuration: configuration
+        ) { _, error in
+            if let error {
+                Self.logger.error("Could not relaunch after client data reset request: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            Task { @MainActor in NSApp.terminate(nil) }
+        }
     }
 
     /// The NAS folder thumbnails are handed around through.

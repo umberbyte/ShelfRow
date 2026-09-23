@@ -66,6 +66,8 @@ final class LibraryStore {
         static let pendingCloudPurge = "libraryPendingCloudPurge"
         /// Which side this device took when syncing was turned on.
         static let cloudRole = "libraryCloudRole"
+        /// Clear all local databases and caches before the next container opens.
+        static let pendingClientDataReset = "libraryPendingClientDataReset"
     }
 
     private(set) var mode: LibraryMode
@@ -83,6 +85,10 @@ final class LibraryStore {
     /// While the library is being queued for upload again.
     private(set) var isResending = false
     private(set) var resendMessage: String?
+
+    /// While duplicate records are being inspected or merged.
+    private(set) var isResolvingDuplicates = false
+    private(set) var duplicateResolutionMessage: String?
 
     /// Which side this device took, or nil if it has never been asked — which is
     /// the case for a device that was syncing before the question was recorded.
@@ -137,6 +143,23 @@ final class LibraryStore {
             }
             #endif
             return
+        }
+
+        // A full client reset has to run before any SwiftData or CloudKit object
+        // can open the files. Preferences remain so the chosen sync mode can
+        // refill an empty local store from iCloud on the next launch.
+        if UserDefaults.standard.bool(forKey: DefaultsKey.pendingClientDataReset) {
+            Self.waitForOtherInstancesToExit()
+            do {
+                try ClientDataReset.clearClientData()
+                Self.logger.info("Completed the requested client data reset")
+            } catch {
+                lastFailureMessage = "データベースとキャッシュの一部を削除できませんでした: \(error.localizedDescription)"
+                Self.logger.error("Client data reset was incomplete: \(error.localizedDescription, privacy: .public)")
+            }
+            UserDefaults.standard.set(false, forKey: DefaultsKey.pendingClientDataReset)
+            UserDefaults.standard.set(false, forKey: DefaultsKey.pendingLibraryReset)
+            UserDefaults.standard.set(false, forKey: DefaultsKey.pendingResetBackupReady)
         }
 
         // Discarding this device's library has to happen with nothing holding the
@@ -306,6 +329,77 @@ final class LibraryStore {
     func disableSync() {
         syncEnabled = false
         persistRequestedMode(.local)
+    }
+
+    /// Schedules a complete local reset for the next process, before SwiftData
+    /// opens either store. The caller relaunches immediately after this returns.
+    @discardableResult
+    func requestClientDataReset() -> Bool {
+        guard blockingTask == nil else { return false }
+        UserDefaults.standard.set(true, forKey: DefaultsKey.pendingClientDataReset)
+        UserDefaults.standard.synchronize()
+        Self.logger.info("A client data reset will run before the next store opens")
+        return true
+    }
+
+    func inspectDuplicateRecords() async -> DuplicateRecordSummary? {
+        guard !isReplica, blockingTask == nil, !isResolvingDuplicates else { return nil }
+
+        isResolvingDuplicates = true
+        duplicateResolutionMessage = nil
+        blockingTask = "重複レコードの確認"
+        defer {
+            blockingTask = nil
+            isResolvingDuplicates = false
+        }
+
+        do {
+            let summary = try await DuplicateRecordResolver(modelContainer: container).preview()
+            if summary.duplicateCount == 0 {
+                duplicateResolutionMessage = "明らかな重複レコードは見つかりませんでした。"
+            }
+            return summary
+        } catch {
+            Self.logger.error("Could not inspect duplicate records: \(error.localizedDescription, privacy: .public)")
+            duplicateResolutionMessage = "重複レコードを確認できませんでした: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    func resolveDuplicateRecords() async {
+        guard !isReplica, blockingTask == nil, !isResolvingDuplicates else { return }
+
+        isResolvingDuplicates = true
+        duplicateResolutionMessage = nil
+        blockingTask = "重複解消前のバックアップ"
+        let backupSucceeded = await Task.detached(priority: .utility) {
+            StoreFileBackup.snapshotBeforeModeSwitch()
+        }.value
+
+        guard backupSucceeded else {
+            blockingTask = nil
+            isResolvingDuplicates = false
+            duplicateResolutionMessage = "バックアップを作成できなかったため、重複レコードは変更しませんでした。"
+            return
+        }
+
+        blockingTask = "重複レコードの解消"
+        defer {
+            blockingTask = nil
+            isResolvingDuplicates = false
+        }
+
+        do {
+            let result = try await DuplicateRecordResolver(modelContainer: container).resolve()
+            BookmarkVault.shared.attach(to: container)
+            await ThumbnailCache.shared.invalidateMemoryCache()
+            duplicateResolutionMessage = result.duplicateCount == 0
+                ? "明らかな重複レコードは見つかりませんでした。"
+                : "\(result.groupCount.formatted())組、\(result.duplicateCount.formatted())件の重複レコードを統合しました。iCloud同期が完了するまでこのままにしてください。"
+        } catch {
+            Self.logger.error("Could not resolve duplicate records: \(error.localizedDescription, privacy: .public)")
+            duplicateResolutionMessage = "重複レコードを解消できませんでした: \(error.localizedDescription)"
+        }
     }
 
     /// Turns syncing off and asks for iCloud's copy to be deleted.

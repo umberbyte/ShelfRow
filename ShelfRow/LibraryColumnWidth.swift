@@ -46,6 +46,11 @@ nonisolated enum LibraryColumnWidth {
         clamped(startingWidth + visualDelta, for: key)
     }
 
+    static func logicalDragDelta(translation: CGFloat, displayScale: Double) -> Double {
+        guard displayScale.isFinite, displayScale > 0 else { return Double(translation) }
+        return Double(translation) / displayScale
+    }
+
     static func decode(_ rawValue: String) -> Widths {
         guard let data = rawValue.data(using: .utf8),
               let stored = try? JSONDecoder().decode([String: Double].self, from: data) else { return [:] }

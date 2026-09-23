@@ -20,8 +20,33 @@ struct LibraryColumnWidthTests {
     }
 
     @Test func visualDragDirectionChangesWidthInTheSameDirection() {
-        #expect(LibraryColumnWidth.resized(200, by: 30, for: .title) == 230)
-        #expect(LibraryColumnWidth.resized(200, by: -30, for: .title) == 170)
+        let rightDrag = LibraryColumnWidth.logicalDragDelta(translation: 30, displayScale: 1)
+        let leftDrag = LibraryColumnWidth.logicalDragDelta(translation: -30, displayScale: 1)
+
+        #expect(LibraryColumnWidth.resized(200, by: rightDrag, for: .title) == 230)
+        #expect(LibraryColumnWidth.resized(200, by: leftDrag, for: .title) == 170)
+    }
+
+    @Test func compactDragPreservesDirectionAndConvertsToLogicalPoints() {
+        let scale = Double(DisplayMetrics.elementScale)
+
+        #expect(LibraryColumnWidth.logicalDragDelta(translation: 30, displayScale: scale) == 40)
+        #expect(LibraryColumnWidth.logicalDragDelta(translation: -30, displayScale: scale) == -40)
+    }
+
+    @Test func slowFixedCoordinateDragProducesMonotonicWidths() {
+        let translations = stride(from: CGFloat(0), through: 20, by: 0.25)
+        let widths = translations.map { translation in
+            let delta = LibraryColumnWidth.logicalDragDelta(
+                translation: translation,
+                displayScale: Double(DisplayMetrics.elementScale)
+            )
+            return LibraryColumnWidth.resized(200, by: delta, for: .title)
+        }
+
+        #expect(zip(widths, widths.dropFirst()).allSatisfy { current, next in
+            next >= current
+        })
     }
 
     @Test func compactValueColumnsUseFixedWidthsThatFitTheirContents() {
@@ -48,5 +73,14 @@ struct LibraryColumnWidthTests {
         #expect(decoded[LibraryColumnOrder.scopeKey(for: .allBooks)]?[.title] == 260)
         #expect(decoded[LibraryColumnOrder.scopeKey(for: .shelf(shelfID))]?[.title] == 180)
         #expect(decoded[LibraryColumnOrder.scopeKey(for: .shelf(shelfID))]?[.author] == 150)
+    }
+
+    @Test func headerAndRowsUseTheSameEffectiveInsetAtEveryDisplayScale() {
+        for metrics in [DisplayMetrics.regular, DisplayMetrics.compact] {
+            let rowInset = LibraryListLayout.rowBackgroundInset(metrics)
+                + LibraryListLayout.rowInnerInset(metrics)
+
+            #expect(rowInset == LibraryListLayout.contentInset(metrics))
+        }
     }
 }

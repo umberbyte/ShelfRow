@@ -26,7 +26,7 @@ struct LibraryListRow: View {
     private var secondaryTextColor: Color { Color(nsColor: .secondaryLabelColor) }
 
     var body: some View {
-        HStack(spacing: displayMetrics.space(8)) {
+        HStack(spacing: LibraryListLayout.columnSpacing(displayMetrics)) {
             ForEach(columns) { col in
                 listCell(col, item, isSelected: isSelected)
                     .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: col.alignment)

@@ -1347,9 +1347,10 @@ struct ContentView: View {
             let startingWidth = Double(measuredWidth) / scale
             resize = ActiveColumnResize(key: key, startingWidth: startingWidth, width: startingWidth)
         }
-        // The handle moves as the column is laid out, so DragGesture's local
-        // translation is opposite to the divider's visual movement.
-        let visualDelta = -(Double(translation) / scale)
+        let visualDelta = LibraryColumnWidth.logicalDragDelta(
+            translation: translation,
+            displayScale: scale
+        )
         activeColumnResize = ActiveColumnResize(
             key: key,
             startingWidth: resize.startingWidth,
@@ -1482,7 +1483,7 @@ struct ContentView: View {
                     }
                 } else {
                     // List view: clickable column header + aligned rows
-                    listHeaderRow
+                    listHeaderRow(columns: rowColumns)
                     Divider()
                     // Manual selection (reliable single-click) + manual keyboard
                     // navigation. Use ScrollView/LazyVStack instead of List:
@@ -1508,7 +1509,10 @@ struct ContentView: View {
                                     }
                                 )
                                     .frame(maxWidth: .infinity, minHeight: displayMetrics.size(30), alignment: .leading)
-                                    .padding(.horizontal, displayMetrics.space(12))
+                                    .padding(
+                                        .horizontal,
+                                        LibraryListLayout.rowInnerInset(displayMetrics)
+                                    )
                                     .padding(.vertical, displayMetrics.rowSpace(5))
                                     .background(
                                         RoundedRectangle(cornerRadius: 7)
@@ -1518,7 +1522,10 @@ struct ContentView: View {
                                                         : (index.isMultiple(of: 2) ? alternateRowFillColor : rowFillColor)
                                             )
                                     )
-                                    .padding(.horizontal, displayMetrics.space(6))
+                                    .padding(
+                                        .horizontal,
+                                        LibraryListLayout.rowBackgroundInset(displayMetrics)
+                                    )
                                     .padding(.vertical, displayMetrics.rowSpace(1))
                                     .contentShape(Rectangle()) // full-row hit area
                                     .id(item.id)
@@ -1631,9 +1638,9 @@ struct ContentView: View {
     }
 
     // MARK: - List Header Row (click to sort, right-click to show/hide columns)
-    private var listHeaderRow: some View {
-        HStack(spacing: displayMetrics.space(8)) {
-            ForEach(listColumns) { col in
+    private func listHeaderRow(columns: [LibraryListColumn]) -> some View {
+        HStack(spacing: LibraryListLayout.columnSpacing(displayMetrics)) {
+            ForEach(columns) { col in
                 Button {
                     applySort(col.key)
                 } label: {
@@ -1681,7 +1688,10 @@ struct ContentView: View {
                                         }
                                     }
                                     .highPriorityGesture(
-                                        DragGesture(minimumDistance: 1)
+                                        // Measure against the fixed window coordinate space. The handle
+                                        // moves when the column width changes, so local coordinates feed
+                                        // that layout movement back into the next drag value and jitter.
+                                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
                                             .onChanged { value in
                                                 updateListColumnResize(
                                                     col.key,
@@ -1718,7 +1728,8 @@ struct ContentView: View {
                 )
             }
         }
-        .padding(.horizontal, displayMetrics.space(10))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, LibraryListLayout.contentInset(displayMetrics))
         .padding(.vertical, displayMetrics.rowSpace(7))
         .background(subtleFillColor)
         .overlay(alignment: .bottom) {
