@@ -1655,8 +1655,8 @@ struct ContentView: View {
                                 .font(displayMetrics.font(8, weight: .bold))
                         }
                     }
-                    .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: col.alignment)
-                    .frame(width: col.width, alignment: col.alignment)
+                    .frame(maxWidth: col.width == nil ? .infinity : nil, alignment: .center)
+                    .frame(width: col.width, alignment: .center)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
