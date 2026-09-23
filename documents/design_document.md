@@ -386,6 +386,8 @@ macOSのSwiftUI `List` の制約に対応した、実測ベースの確定仕様
 
 Mac 複数台および iPad で書誌メタデータを共有する機能の設計は `documents/multi_device_sync_design.md` に分冊している（2026-09-19 設計確定・未実装）。概要:
 
+環境設定のiCloud画面をWindows版へ移植する際の、レイアウト、表示条件、状態遷移、確認文言、同期サービス境界、受け入れ条件は `documents/icloud_settings_windows_port.md` に分冊している。
+
 *   **書誌メタデータ（Item / Shelf / Volume / CoverExtractionRecord）と共有設定は iCloud（SwiftData + CloudKit / KVS）で同期**する。サムネイルと書籍実体は iCloud に送らない。
 *   **未サインイン・スイッチ OFF 時はローカル動作。** 同じストアファイルを開き方（`cloudKitDatabase`）だけ変えて往復できる。サインアウトでローカルデータが消える経路に入らない。
 *   **Security-Scoped Bookmark とサムネイル取得状態は端末固有**として第2の非同期ストア（`LocalBookmark` / `LocalCoverState`）へ分離する。
