@@ -108,27 +108,6 @@ private struct SmartShelfEditorPresentation: Identifiable {
     }
 }
 
-private enum DroppedFileKind: Equatable {
-    case folder
-    case pageCountedArchive
-    case helperFile
-
-    var shouldUsePageCountForBookType: Bool {
-        switch self {
-        case .folder, .pageCountedArchive: return true
-        case .helperFile: return false
-        }
-    }
-
-    var fileType: Int {
-        switch self {
-        case .folder: return 1
-        case .pageCountedArchive: return 2
-        case .helperFile: return 0
-        }
-    }
-}
-
 private struct DroppedFilePageCountUpdate: Sendable {
     let itemID: UUID
     let pageCount: Int
@@ -2558,7 +2537,8 @@ struct ContentView: View {
                 defer { dropQueueRemaining -= 1 }
 
                 let url = fact.url
-                guard fact.exists, let kind = droppedFileKind(for: url, isDirectory: fact.isDirectory) else { continue }
+                guard fact.exists,
+                      let kind = libraryRegistrar.kind(for: url, isDirectory: fact.isDirectory) else { continue }
 
                 if let id = addDroppedFile(
                     url: url,
@@ -2584,6 +2564,21 @@ struct ContentView: View {
         }
     }
 
+    /// Registering a file is the same work wherever it is asked for, so the view
+    /// holds no copy of it — only the settings it is done under, which it is
+    /// already watching for changes.
+    private var libraryRegistrar: LibraryRegistrar {
+        LibraryRegistrar(
+            context: modelContext,
+            vault: .shared,
+            settings: LibraryRegistrar.Settings(
+                renameFormat: customRenameFormat,
+                typeNames: typeNames,
+                helperExtensions: LibraryRegistrar.Settings.extensions(in: helperExtensionsList)
+            )
+        )
+    }
+
     private func currentStaticShelfID() -> UUID? {
         guard case .shelf(let shelfID) = sidebarSelection,
               shelves.contains(where: { $0.id == shelfID && $0.type == 0 }) else {
@@ -2592,22 +2587,9 @@ struct ContentView: View {
         return shelfID
     }
 
-    private func droppedFileKind(for url: URL, isDirectory: Bool) -> DroppedFileKind? {
-        if isDirectory { return .folder }
 
-        let ext = url.pathExtension.lowercased()
-        if ["zip", "rar", "7z"].contains(ext), ext == "zip" || helperExtensionIsRegistered(ext) {
-            return .pageCountedArchive
-        }
-
-        if helperExtensionIsRegistered(ext) {
-            return .helperFile
-        }
-
-        return nil
-    }
-
-    /// Registers a single dropped file. Returns the Item id if newly added.
+    /// What the view adds to registering a file: the page count it starts
+    /// afterwards, and the selection that follows the last one in.
     @discardableResult
     private func addDroppedFile(
         url: URL,
@@ -2617,85 +2599,24 @@ struct ContentView: View {
         itemsByPath: inout [String: Item],
         volumesByPath: inout [String: Volume]
     ) -> UUID? {
-        let (volumePath, volumeName, relativePath) = PathParser.split(url.path)
-
-        // Prevent duplicate (Merge logic). Re-dropping an existing item also
-        // repairs its access permission via a fresh security-scoped bookmark.
-        if let existing = itemsByPath[relativePath] {
-            if let refreshed = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
-                BookmarkVault.shared.setBookmark(
-                    refreshed,
-                    for: existing.id,
-                    saveImmediately: !deferBookmarkSave
-                )
-            }
-            addToStaticShelfIfNeeded(existing, shelfID: targetShelfID)
-            if existing.pages == 0 {
-                schedulePageCountRefreshIfNeeded(
-                    itemID: existing.id,
-                    url: url,
-                    kind: kind,
-                    shouldApplyAutoBookType: false
-                )
-            }
-            return existing.id
-        }
-
-        // Find or create Volume
-        let volume: Volume
-        if let existingVol = volumesByPath[volumePath] {
-            volume = existingVol
-        } else {
-            let newVol = Volume(name: volumeName, lastKnownPath: volumePath)
-            modelContext.insert(newVol)
-            volumesByPath[volumePath] = newVol
-            volume = newVol
-        }
-
-        // Create new blank item dynamically from D&D drop!
-        // The drop grants sandbox access to this URL right now, so persist an
-        // item-level security-scoped bookmark for future launches.
-        let itemBookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
-
-        // Parse 「(ジャンル)[作者名]タイトル」 from the file name
-        let parsed = FileNameParser.parse(fileName: url.lastPathComponent, format: customRenameFormat)
-        let title = parsed.title.isEmpty ? url.deletingPathExtension().lastPathComponent : parsed.title
-        let parsedBookType = bookTypeIndex(for: parsed.type)
-        let selectedBookType = parsedBookType ?? (kind == .helperFile ? 5 : 0)
-
-        let itemID = UUID()
-        let newItem = Item(
-            id: itemID,
-            volume: volume,
-            relativePath: relativePath,
-            title: title,
-            author: parsed.author,
-            genre: parsed.genre,
-            relation: parsed.relation,
-            keywordA: parsed.keywordA,
-            keywordB: parsed.keywordB,
-            pages: 0,
-            bookType: selectedBookType,
-            fileType: kind.fileType
-        )
-
-        modelContext.insert(newItem)
-        itemsByPath[relativePath] = newItem
-        if let itemBookmark {
-            BookmarkVault.shared.setBookmark(
-                itemBookmark,
-                for: itemID,
-                saveImmediately: !deferBookmarkSave
-            )
-        }
-        addToStaticShelfIfNeeded(newItem, shelfID: targetShelfID)
-        schedulePageCountRefreshIfNeeded(
-            itemID: itemID,
+        let outcome = libraryRegistrar.register(
             url: url,
             kind: kind,
-            shouldApplyAutoBookType: parsedBookType == nil
+            targetShelfID: targetShelfID,
+            deferBookmarkSave: deferBookmarkSave,
+            itemsByPath: &itemsByPath,
+            volumesByPath: &volumesByPath
         )
-        return newItem.id
+
+        if outcome.shouldCountPages {
+            schedulePageCountRefreshIfNeeded(
+                itemID: outcome.itemID,
+                url: url,
+                kind: kind,
+                shouldApplyAutoBookType: outcome.shouldApplyAutoBookType
+            )
+        }
+        return outcome.isNew ? outcome.itemID : nil
     }
 
     private func schedulePageCountRefreshIfNeeded(
@@ -2728,26 +2649,6 @@ struct ContentView: View {
         try? modelContext.save()
     }
 
-    /// A dropped file should be registered in the library and added to the
-    /// normal shelf that was targeted when the drop started. Smart shelves are
-    /// condition-based, so they remain automatic and are not manually mutated.
-    private func addToStaticShelfIfNeeded(_ item: Item, shelfID: UUID?) {
-        guard let shelfID,
-              let shelf = shelves.first(where: { $0.id == shelfID && $0.type == 0 }) else {
-            return
-        }
-
-        var shelfItems = shelf.items ?? []
-        guard !shelfItems.contains(where: { $0.id == item.id }) else { return }
-        shelfItems.append(item)
-        shelf.items = shelfItems
-    }
-
-    private func bookTypeIndex(for parsedType: String) -> Int? {
-        let trimmed = parsedType.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return typeNames.firstIndex { $0.localizedCaseInsensitiveCompare(trimmed) == .orderedSame }
-    }
 
     private func runMaintenanceAction(_ action: MaintenanceAction) {
         switch action {
@@ -3068,7 +2969,7 @@ struct ContentView: View {
             if item.relation.isEmpty { item.relation = parsed.relation }
             if item.keywordA.isEmpty { item.keywordA = parsed.keywordA }
             if item.keywordB.isEmpty { item.keywordB = parsed.keywordB }
-            if let parsedBookType = bookTypeIndex(for: parsed.type) {
+            if let parsedBookType = libraryRegistrar.bookTypeIndex(for: parsed.type) {
                 item.bookType = parsedBookType
             }
             updated += 1
