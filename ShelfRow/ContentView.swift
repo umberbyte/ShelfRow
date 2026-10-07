@@ -1474,6 +1474,7 @@ struct ContentView: View {
                         sortKey: sortKey,
                         sortAscending: sortAscending,
                         visibleColumnKeys: visibleColumnKeys,
+                        scrollTargetID: selection.scrollTargetID,
                         typeNames: rowTypeNames,
                         displayMetrics: displayMetrics,
                         onSelectionChange: applyTableSelection,
@@ -1482,7 +1483,13 @@ struct ContentView: View {
                         onColumnWidthChange: { key, width in
                             persistListColumnWidth(width, for: key)
                         },
-                        onDeleteSelection: deleteSelectedItemsFromKeyboard
+                        onDeleteSelection: deleteSelectedItemsFromKeyboard,
+                        // Cleared on the next turn: this is called from inside
+                        // SwiftUI's update, where changing observed state again
+                        // would be a write during a read.
+                        onScrollTargetShown: {
+                            Task { @MainActor in selection.scrollTargetID = nil }
+                        }
                     )
                     .background(modernSurfaceColor)
                 }

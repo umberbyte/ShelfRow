@@ -13,7 +13,7 @@
 *   **`LibraryRegistrationIndex`（`LibraryProjection.swift`）:** 「このパスの本はもう居るか」を1ファイルにつき1回答えるための索引。2万件に対してこれは辞書引きでなければならず、しかも辞書はドロップより長く生きている必要がある（ファイルごとに作り直すと件数の二乗になる）。パスが変わったら古いキーを外す（`update(_:relativePath:)`）。`LibraryRegistrar` は辞書の `inout` ではなくこの索引を受け取る。
 *   **`LibrarySelectionState.selectRegisteredItem` / `consumePendingReveal`:** 登録直後の本を選択し、アンカーもそこへ移す。表示は保留する — 登録は、スクロール先の行を持つ投影より先に終わるため。行が揃った時点（`refreshDisplayItems`）で一度だけ答え、以後は忘れる。
 *   **`LibraryTableSortDescriptor` / `LibraryTableSortSelection`（新規 `LibraryTableSorting.swift`）:** 列ヘッダをネイティブの並び替えに対応させた。各列に `sortDescriptorPrototype` を与え、`sortDescriptorsDidChange` で列と方向を受け取る（`.setSort`）。方向は AppKit が決めるのでトグルではない。`didClick` 側の処理は外した — 両方が動くと二重に並び替えて元に戻る。ヘッダの矢印は現在の並び順に合わせる（起動時の復元やメニューからの変更も反映される）。
-*   **未接続:** `scrollTargetID` を実際にスクロールへ繋ぐ箇所はまだ無い。登録 → 選択 → 行が揃ったら `scrollTargetID` までは繋がっている。
+*   **スクロールまで接続:** `scrollTargetID` を `NSTableView.scrollRowToVisible` に繋いだ。登録 → 選択 → 行が揃う → その行まで送る、が通る。`scrollRowToVisible` は画面外のときだけ動くので、すでに見えている本は跳ねない。行がまだ無ければ何もせず次回へ持ち越す（投影は登録より後に組み直されるため）。表示できた時点で `scrollTargetID` を消すが、これは SwiftUI の更新中に呼ばれるので次のターンで行う（更新中に観測対象を書き換えないため）。行の特定は `LibraryTableScrollTarget` に分け、ウインドウ無しで検査できるようにした。
 
 ### 📅 第29期：コマンドライン操作
 *   **目的:** ファイル名とシェルフ名を渡すと、そのシェルフへドラッグ&ドロップしたのと同じ登録を行う。シェルフの一覧も引ける。

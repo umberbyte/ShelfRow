@@ -36,3 +36,15 @@ enum LibraryTableSortDescriptor {
         return LibraryTableSortSelection(key: key, ascending: descriptor.ascending)
     }
 }
+
+/// Which row a book is, for the one caller that has to scroll to it.
+///
+/// Separated from the scrolling so the decision can be tried without a window:
+/// a book the list does not have is not a row to leave the person staring at,
+/// it is a target to keep waiting for.
+enum LibraryTableScrollTarget {
+    static func row(for itemID: UUID?, in rows: [LibraryListRowSnapshot]) -> Int? {
+        guard let itemID else { return nil }
+        return rows.firstIndex { $0.id == itemID }
+    }
+}

@@ -32,6 +32,10 @@ struct LibraryTableView: NSViewRepresentable {
     let sortKey: ItemSortKey
     let sortAscending: Bool
     let visibleColumnKeys: Set<String>
+    /// A book that should be brought into view once there is a row for it —
+    /// one just registered, normally. Cleared through `onScrollTargetShown`
+    /// so it scrolls once rather than on every redraw.
+    let scrollTargetID: UUID?
     let typeNames: [String]
     let displayMetrics: DisplayMetrics
     let onSelectionChange: (Set<UUID>, UUID?) -> Void
@@ -39,6 +43,7 @@ struct LibraryTableView: NSViewRepresentable {
     let onColumnOrderChange: ([ItemSortKey]) -> Void
     let onColumnWidthChange: (ItemSortKey, Double) -> Void
     let onDeleteSelection: () -> Void
+    let onScrollTargetShown: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -108,9 +113,27 @@ struct LibraryTableView: NSViewRepresentable {
             }
 
             applySelection(to: tableView)
+            scrollToTargetIfPresent(in: tableView)
             configureTableAppearance(tableView)
             tableView.headerView?.menu = headerMenu()
             hostView?.needsLayout = true
+        }
+
+        /// Brings the waiting book into view, if the rows have reached it.
+        ///
+        /// `scrollRowToVisible` moves only when the row is off screen, so a book
+        /// that was already in sight stays where it is rather than jumping to an
+        /// edge. Reported back either way: a target that is still not among the
+        /// rows is left for the next pass, and one that has been shown is done
+        /// with.
+        private func scrollToTargetIfPresent(in tableView: NSTableView) {
+            guard let row = LibraryTableScrollTarget.row(
+                for: parent.scrollTargetID,
+                in: displayedRows
+            ) else { return }
+
+            tableView.scrollRowToVisible(row)
+            parent.onScrollTargetShown()
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int {
