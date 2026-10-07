@@ -15,6 +15,9 @@ enum LibraryTableAction {
     case editCover(UUID)
     case reassignFile(UUID)
     case sort(ItemSortKey)
+    /// A column header was clicked: the column and the direction it asked for,
+    /// rather than a toggle, since AppKit has already decided which way.
+    case setSort(ItemSortKey, ascending: Bool)
     case toggleColumn(ItemSortKey)
 }
 
@@ -182,9 +185,16 @@ struct LibraryTableView: NSViewRepresentable {
             parent.onSelectionChange(ids, primaryID)
         }
 
-        func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
-            guard let key = ItemSortKey(rawValue: tableColumn.identifier.rawValue) else { return }
-            parent.onAction(.sort(key))
+        /// Clicking a header is AppKit's business once the columns carry sort
+        /// descriptors: it decides the direction, shows the arrow, and tells us
+        /// below. Acting on the click as well would sort twice and land back
+        /// where it started.
+        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            guard !isApplyingColumns,
+                  let selection = LibraryTableSortDescriptor.selection(from: tableView.sortDescriptors) else {
+                return
+            }
+            parent.onAction(.setSort(selection.key, ascending: selection.ascending))
         }
 
         func tableViewColumnDidMove(_ notification: Notification) {
@@ -344,10 +354,21 @@ struct LibraryTableView: NSViewRepresentable {
                 column.resizingMask = LibraryColumnWidth.isResizable(state.key)
                     ? [.userResizingMask]
                     : []
+                column.sortDescriptorPrototype = LibraryTableSortDescriptor.make(
+                    key: state.key,
+                    ascending: true
+                )
                 tableView.addTableColumn(column)
                 appliedColumnWidths[state.key] = column.width
             }
             appliedColumns = states
+
+            // The arrow belongs to whichever column the list is sorted by, which
+            // is not necessarily one the person clicked — it is restored at
+            // launch, and the menu sets it too.
+            tableView.sortDescriptors = [
+                LibraryTableSortDescriptor.make(key: parent.sortKey, ascending: parent.sortAscending)
+            ]
         }
 
         private func configureTableAppearance(_ tableView: NSTableView) {

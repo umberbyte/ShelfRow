@@ -27,6 +27,88 @@ final class LibrarySelectionState {
     var index: Int?
     var lastScrollIndex: Int?
     var scrollTargetID: UUID?
+
+    /// A book that has just been registered and should be shown once the list
+    /// has it. Held rather than acted on immediately: registration finishes
+    /// before the projection that would have a row to scroll to.
+    @ObservationIgnored private var pendingReveal: UUID?
+
+    /// Makes a newly registered book the selection, the way finishing a drop
+    /// does: one book selected, and the anchor moved to it so a shift-click
+    /// afterwards ranges from there rather than from wherever the cursor was.
+    func selectRegisteredItem(_ itemID: UUID) {
+        self.itemID = itemID
+        itemIDs = [itemID]
+        anchorID = itemID
+        pendingReveal = itemID
+    }
+
+    /// The book waiting to be shown, once it is among the rows there are.
+    ///
+    /// Answers once and then forgets, so a list that redraws several times does
+    /// not scroll back each time. A book the list does not have yet stays
+    /// waiting: the projection is rebuilt asynchronously, and the row usually
+    /// arrives a moment after the registration that made it.
+    func consumePendingReveal(visibleIDs: Set<UUID>) -> UUID? {
+        guard let pendingReveal, visibleIDs.contains(pendingReveal) else { return nil }
+        self.pendingReveal = nil
+        return pendingReveal
+    }
+}
+
+/// The library as registration needs to see it: which book stands for which
+/// path, and which model that is.
+///
+/// Registering a drop asks "is this one already here?" once per file. Against a
+/// library of twenty thousand that question has to be a dictionary lookup, and
+/// the dictionary has to outlive the drop — rebuilding it per file is what made
+/// a large drop quadratic.
+@MainActor @Observable
+final class LibraryRegistrationIndex {
+    /// The models, by identifier.
+    private(set) var models: [UUID: Item] = [:]
+    /// The same models, by the path that identifies them in the library.
+    private(set) var itemsByPath: [String: Item] = [:]
+    /// What the list draws from, kept beside the models it was taken from.
+    private(set) var snapshots: [LibraryItemSnapshot] = []
+
+    private var pathsByID: [UUID: String] = [:]
+
+    init() {}
+
+    /// Takes a freshly projected library wholesale.
+    func replace(models: [UUID: Item], snapshots: [LibraryItemSnapshot]) {
+        self.models = models
+        self.snapshots = snapshots
+
+        itemsByPath.removeAll(keepingCapacity: true)
+        pathsByID.removeAll(keepingCapacity: true)
+        for (id, item) in models {
+            let path = item.relativePath
+            itemsByPath[path] = item
+            pathsByID[id] = path
+        }
+    }
+
+    /// Records a book whose path has changed — moved, renamed, or newly
+    /// registered. The old key goes with it, or the file that used to be there
+    /// would still answer to its name.
+    func update(_ item: Item, relativePath: String) {
+        if let previous = pathsByID[item.id], previous != relativePath {
+            itemsByPath[previous] = nil
+        }
+        models[item.id] = item
+        itemsByPath[relativePath] = item
+        pathsByID[item.id] = relativePath
+    }
+
+    /// Forgets a book the library no longer has.
+    func remove(_ itemID: UUID) {
+        if let path = pathsByID.removeValue(forKey: itemID) {
+            itemsByPath[path] = nil
+        }
+        models[itemID] = nil
+    }
 }
 
 struct LibraryItemSnapshot: Sendable, Equatable {

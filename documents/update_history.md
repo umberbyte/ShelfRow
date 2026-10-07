@@ -8,6 +8,13 @@
 
 ## 1. 開発マイルストーン ＆ 変更履歴 (Milestones & Change Log)
 
+### 📅 第30期：ドロップ処理のリファクタの完了（登録インデックス・選択・列ヘッダのソート）
+*   **背景:** 作業中のテストが、まだ存在しない3つの型を仕様として書いていた。それを実装して繋いだ。
+*   **`LibraryRegistrationIndex`（`LibraryProjection.swift`）:** 「このパスの本はもう居るか」を1ファイルにつき1回答えるための索引。2万件に対してこれは辞書引きでなければならず、しかも辞書はドロップより長く生きている必要がある（ファイルごとに作り直すと件数の二乗になる）。パスが変わったら古いキーを外す（`update(_:relativePath:)`）。`LibraryRegistrar` は辞書の `inout` ではなくこの索引を受け取る。
+*   **`LibrarySelectionState.selectRegisteredItem` / `consumePendingReveal`:** 登録直後の本を選択し、アンカーもそこへ移す。表示は保留する — 登録は、スクロール先の行を持つ投影より先に終わるため。行が揃った時点（`refreshDisplayItems`）で一度だけ答え、以後は忘れる。
+*   **`LibraryTableSortDescriptor` / `LibraryTableSortSelection`（新規 `LibraryTableSorting.swift`）:** 列ヘッダをネイティブの並び替えに対応させた。各列に `sortDescriptorPrototype` を与え、`sortDescriptorsDidChange` で列と方向を受け取る（`.setSort`）。方向は AppKit が決めるのでトグルではない。`didClick` 側の処理は外した — 両方が動くと二重に並び替えて元に戻る。ヘッダの矢印は現在の並び順に合わせる（起動時の復元やメニューからの変更も反映される）。
+*   **未接続:** `scrollTargetID` を実際にスクロールへ繋ぐ箇所はまだ無い。登録 → 選択 → 行が揃ったら `scrollTargetID` までは繋がっている。
+
 ### 📅 第29期：コマンドライン操作
 *   **目的:** ファイル名とシェルフ名を渡すと、そのシェルフへドラッグ&ドロップしたのと同じ登録を行う。シェルフの一覧も引ける。
 *   **別ツールにしなかった理由:** 蔵書のモデル・設定・「登録するとは何をすることか」の規則を二重に持つことになり、どちらかを直した時点で食い違う。アプリ本体のバイナリが、コマンドを与えられたときだけコマンドラインとして振る舞う。

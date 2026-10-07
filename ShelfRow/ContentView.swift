@@ -2228,6 +2228,12 @@ struct ContentView: View {
                 shelfCounts = result.shelfCounts
                 isUpdatingLibrary = false
                 refreshSelectedDisplayIndex()
+
+                // A book registered a moment ago has a row only now. This is the
+                // first point at which there is something to scroll to.
+                if let revealed = selection.consumePendingReveal(visibleIDs: Set(result.ids)) {
+                    selection.scrollTargetID = revealed
+                }
             } catch is CancellationError {
                 // The replacement task owns the progress indicator.
             } catch {
@@ -2373,6 +2379,10 @@ struct ContentView: View {
         switch action {
         case .sort(let key):
             applySort(key)
+        case .setSort(let key, let ascending):
+            // The header has already decided which way; this is not a toggle.
+            sortKey = key
+            sortAscending = ascending
         case .toggleColumn(let key):
             toggleColumn(key)
         case .startSlideshow(let id):
@@ -2496,9 +2506,10 @@ struct ContentView: View {
             dropQueueRemaining = facts.count
             var lastAddedID: UUID?
             var pageCounts: [DroppedFilePageCountRequest] = []
-            var itemsByPath = Dictionary(
-                allItems.map { ($0.relativePath, $0) },
-                uniquingKeysWith: { first, _ in first }
+            let registrationIndex = LibraryRegistrationIndex()
+            registrationIndex.replace(
+                models: Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
+                snapshots: []
             )
             var volumesByPath = Dictionary(
                 ((try? modelContext.fetch(FetchDescriptor<Volume>())) ?? []).map { ($0.lastKnownPath, $0) },
@@ -2514,7 +2525,7 @@ struct ContentView: View {
                     fact: fact,
                     kind: kind,
                     targetShelfID: targetShelfID,
-                    itemsByPath: &itemsByPath,
+                    index: registrationIndex,
                     volumesByPath: &volumesByPath
                 )
                 if outcome.isNew { lastAddedID = outcome.itemID }
@@ -2527,9 +2538,7 @@ struct ContentView: View {
             BookmarkVault.shared.savePendingChanges()
             try? modelContext.save()
             if let lastAddedID {
-                selectedItemID = lastAddedID
-                selectedItemIDs = [lastAddedID]
-                selectionAnchorItemID = lastAddedID
+                selection.selectRegisteredItem(lastAddedID)
             }
 
             // Counting pages means reading every archive, so it follows the

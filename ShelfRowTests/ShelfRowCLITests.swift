@@ -162,13 +162,13 @@ struct LibraryRegistrarTests {
         let shelf = Shelf(title: "未整理", icon: 0, type: 0)
         context.insert(shelf)
 
-        var items: [String: Item] = [:]
+        let index = LibraryRegistrationIndex()
         var volumes: [String: Volume] = [:]
         let outcome = registrar.register(
             fact: fact("/Volumes/Files/本/[作者] 題名.zip"),
             kind: .pageCountedArchive,
             targetShelfID: shelf.id,
-            itemsByPath: &items,
+            index: index,
             volumesByPath: &volumes
         )
 
@@ -195,12 +195,12 @@ struct LibraryRegistrarTests {
         context.insert(shelf)
         let dropped = fact("/Volumes/Files/本/巻1.zip")
 
-        var items: [String: Item] = [:]
+        let index = LibraryRegistrationIndex()
         var volumes: [String: Volume] = [:]
         let first = registrar.register(fact: dropped, kind: .pageCountedArchive, targetShelfID: shelf.id,
-                                       itemsByPath: &items, volumesByPath: &volumes)
+                                       index: index, volumesByPath: &volumes)
         let second = registrar.register(fact: dropped, kind: .pageCountedArchive, targetShelfID: shelf.id,
-                                        itemsByPath: &items, volumesByPath: &volumes)
+                                        index: index, volumesByPath: &volumes)
 
         #expect(first.isNew)
         #expect(!second.isNew)
@@ -218,13 +218,13 @@ struct LibraryRegistrarTests {
         let smart = Shelf(title: "未読", icon: 0, type: 1)
         context.insert(smart)
 
-        var items: [String: Item] = [:]
+        let index = LibraryRegistrationIndex()
         var volumes: [String: Volume] = [:]
         _ = registrar.register(
             fact: fact("/Volumes/Files/本/巻1.zip"),
             kind: .pageCountedArchive,
             targetShelfID: smart.id,
-            itemsByPath: &items,
+            index: index,
             volumesByPath: &volumes
         )
 
@@ -257,20 +257,20 @@ struct LibraryRegistrarTests {
         let context = container.mainContext
         let registrar = makeRegistrar(container)
 
-        var items: [String: Item] = [:]
+        let index = LibraryRegistrationIndex()
         var volumes: [String: Volume] = [:]
         let archive = registrar.register(
             fact: fact("/Volumes/Files/本/巻1.zip"),
             kind: .pageCountedArchive,
             targetShelfID: nil,
-            itemsByPath: &items,
+            index: index,
             volumesByPath: &volumes
         )
         let movie = registrar.register(
             fact: fact("/Volumes/Files/本/映像.mov"),
             kind: .helperFile,
             targetShelfID: nil,
-            itemsByPath: &items,
+            index: index,
             volumesByPath: &volumes
         )
 
@@ -294,7 +294,7 @@ struct LibraryRegistrarTests {
         let container = try makeLibrary()
         let registrar = makeRegistrar(container)
 
-        var items: [String: Item] = [:]
+        let index = LibraryRegistrationIndex()
         var volumes: [String: Volume] = [:]
         // The format puts the type in the name, so the count must not overrule it.
         let named = LibraryRegistrar(
@@ -310,7 +310,7 @@ struct LibraryRegistrarTests {
             fact: fact("/Volumes/Files/本/[薄い本] 題名.zip"),
             kind: .pageCountedArchive,
             targetShelfID: nil,
-            itemsByPath: &items,
+            index: index,
             volumesByPath: &volumes
         )
 

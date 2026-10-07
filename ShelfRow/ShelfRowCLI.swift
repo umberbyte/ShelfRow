@@ -257,9 +257,13 @@ enum ShelfRowCLI {
         }
 
         let registrar = LibraryRegistrar(context: context, vault: vault, settings: .fromDefaults())
-        var itemsByPath = Dictionary(
-            ((try? context.fetch(FetchDescriptor<Item>())) ?? []).map { ($0.relativePath, $0) },
-            uniquingKeysWith: { first, _ in first }
+        let index = LibraryRegistrationIndex()
+        index.replace(
+            models: Dictionary(
+                ((try? context.fetch(FetchDescriptor<Item>())) ?? []).map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            ),
+            snapshots: []
         )
         var volumesByPath = Dictionary(
             ((try? context.fetch(FetchDescriptor<Volume>())) ?? []).map { ($0.lastKnownPath, $0) },
@@ -298,7 +302,7 @@ enum ShelfRowCLI {
                 fact: fact,
                 kind: kind,
                 targetShelfID: targetShelfID,
-                itemsByPath: &itemsByPath,
+                index: index,
                 volumesByPath: &volumesByPath
             )
             if let request = outcome.pageCount {

@@ -116,14 +116,15 @@ struct LibraryRegistrar {
 
     /// Registers one file, or refreshes the book already standing for it.
     ///
-    /// The two dictionaries are carried by the caller so a run over many files
-    /// does not re-fetch the library for each one; they are updated as it goes.
+    /// The index and the volume dictionary are carried by the caller so a run
+    /// over many files does not re-fetch the library for each one; both are
+    /// updated as it goes.
     func register(
         fact: DroppedFileFact,
         kind: DroppedFileKind,
         targetShelfID: UUID?,
         deferBookmarkSave: Bool = true,
-        itemsByPath: inout [String: Item],
+        index: LibraryRegistrationIndex,
         volumesByPath: inout [String: Volume]
     ) -> Outcome {
         let url = fact.url
@@ -131,7 +132,7 @@ struct LibraryRegistrar {
 
         // Already here: keep the one book and take the chance to renew its
         // access, which is the other half of what re-dropping a file is for.
-        if let existing = itemsByPath[relativePath] {
+        if let existing = index.itemsByPath[relativePath] {
             if let bookmark = fact.bookmarkData {
                 vault.setBookmark(bookmark, for: existing.id, saveImmediately: !deferBookmarkSave)
             }
@@ -177,7 +178,7 @@ struct LibraryRegistrar {
         )
 
         context.insert(item)
-        itemsByPath[relativePath] = item
+        index.update(item, relativePath: relativePath)
         if let bookmark = fact.bookmarkData {
             vault.setBookmark(bookmark, for: itemID, saveImmediately: !deferBookmarkSave)
         }
