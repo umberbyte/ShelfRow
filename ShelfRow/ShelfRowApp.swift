@@ -146,8 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Not `@main`: `main.swift` decides first whether this run is a command rather
-/// than a window. See `ShelfRowCLI`.
+@main
 struct ShelfRowApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearanceMode.system.rawValue

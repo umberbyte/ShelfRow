@@ -288,21 +288,6 @@ ZIP → 表紙抽出 → キャッシュ  ─►  ShelfRowThumbnails/  ─►  �
 
 ---
 
-## ⌨️ コマンドライン
-
-ファイルをシェルフへ登録する操作と、シェルフの一覧表示は、コマンドラインからも行えます。アプリ本体のバイナリが、コマンドを与えられたときだけそう振る舞います。
-
-```bash
-alias shelfrow='/Applications/ShelfRow.app/Contents/MacOS/ShelfRow'
-
-shelfrow shelves                                  # シェルフの一覧（タブ区切り）
-shelfrow add ~/Downloads/巻1.zip --shelf 未整理   # ドラッグ&ドロップと同じ登録
-```
-
-登録の中身はドラッグ&ドロップとまったく同じです（同じ実装を呼んでいます）。ただし **追加できるのは登録済みボリュームの中のファイルだけ**で、**`add` はアプリを終了してから**実行します。理由と全コマンドは **[コマンドライン マニュアル](documents/cli_manual.md)** にあります。
-
----
-
 ## 💻 動作環境
 
 * **対応OS**: macOS 14.0 (Sonoma) 以降
