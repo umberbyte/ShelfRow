@@ -122,7 +122,7 @@ struct LibraryRegistrar {
     func register(
         fact: DroppedFileFact,
         kind: DroppedFileKind,
-        targetShelfID: UUID?,
+        targetShelf: Shelf?,
         deferBookmarkSave: Bool = true,
         index: LibraryRegistrationIndex,
         volumesByPath: inout [String: Volume]
@@ -136,7 +136,7 @@ struct LibraryRegistrar {
             if let bookmark = fact.bookmarkData {
                 vault.setBookmark(bookmark, for: existing.id, saveImmediately: !deferBookmarkSave)
             }
-            addToStaticShelf(existing, shelfID: targetShelfID)
+            addToStaticShelf(existing, shelf: targetShelf)
             let needsPages = existing.pages == 0 && kind.shouldUsePageCountForBookType
             return Outcome(
                 itemID: existing.id,
@@ -182,7 +182,7 @@ struct LibraryRegistrar {
         if let bookmark = fact.bookmarkData {
             vault.setBookmark(bookmark, for: itemID, saveImmediately: !deferBookmarkSave)
         }
-        addToStaticShelf(item, shelfID: targetShelfID)
+        addToStaticShelf(item, shelf: targetShelf)
 
         return Outcome(
             itemID: itemID,
@@ -199,11 +199,8 @@ struct LibraryRegistrar {
 
     /// Records a page count that has come back, and the type it implies when the
     /// file name did not already say.
-    func apply(_ update: DroppedFilePageCountUpdate) {
-        let itemID = update.itemID
-        guard let item = try? context.fetch(
-            FetchDescriptor<Item>(predicate: #Predicate { $0.id == itemID })
-        ).first else { return }
+    func apply(_ update: DroppedFilePageCountUpdate, index: LibraryRegistrationIndex) {
+        guard let item = index.models[update.itemID] else { return }
 
         item.pages = update.pageCount
         if update.shouldApplyAutoBookType,
@@ -214,19 +211,27 @@ struct LibraryRegistrar {
 
     /// Ordinary shelves are a list someone keeps; smart shelves are a question
     /// the library answers, so nothing is put into them by hand.
-    private func addToStaticShelf(_ item: Item, shelfID: UUID?) {
-        guard let shelfID,
-              let shelf = try? context.fetch(
-                FetchDescriptor<Shelf>(predicate: #Predicate { $0.id == shelfID })
-              ).first,
-              shelf.type == 0 else {
-            return
-        }
+    ///
+    /// The shelf is looked up once for a whole drop — see `shelf(withID:)`. It
+    /// used to be fetched per file, which is a query against the store for every
+    /// item of a drop that may be thousands long, on the actor drawing the
+    /// window.
+    private func addToStaticShelf(_ item: Item, shelf: Shelf?) {
+        guard let shelf, shelf.type == 0 else { return }
 
         var items = shelf.items ?? []
         guard !items.contains(where: { $0.id == item.id }) else { return }
         items.append(item)
         shelf.items = items
+    }
+
+    /// The shelf a drop is aimed at, fetched once by whoever is about to
+    /// register a run of files.
+    func shelf(withID shelfID: UUID?) -> Shelf? {
+        guard let shelfID else { return nil }
+        return try? context.fetch(
+            FetchDescriptor<Shelf>(predicate: #Predicate { $0.id == shelfID })
+        ).first
     }
 
     /// The index of the type a file name named, if it named one the person uses.

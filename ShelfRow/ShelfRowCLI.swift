@@ -245,11 +245,11 @@ enum ShelfRowCLI {
         context: ModelContext,
         vault: BookmarkVault
     ) -> Int32 {
-        var targetShelfID: UUID?
+        var targetShelf: Shelf?
         if let shelfName {
             switch findShelf(named: shelfName, context: context) {
             case .success(let shelf):
-                targetShelfID = shelf.id
+                targetShelf = shelf
             case .failure(let failure):
                 write(failure.localizedDescription, to: .standardError)
                 return 65  // EX_DATAERR
@@ -301,7 +301,7 @@ enum ShelfRowCLI {
             let outcome = registrar.register(
                 fact: fact,
                 kind: kind,
-                targetShelfID: targetShelfID,
+                targetShelf: targetShelf,
                 index: index,
                 volumesByPath: &volumesByPath
             )
@@ -313,7 +313,7 @@ enum ShelfRowCLI {
                     pageCount: ItemFileAccess.listPages(at: request.url).count,
                     shouldApplyAutoBookType: request.shouldApplyAutoBookType
                 )
-                registrar.apply(update)
+                registrar.apply(update, index: index)
                 pageCounts.append(request)
             }
 

@@ -167,7 +167,7 @@ struct LibraryRegistrarTests {
         let outcome = registrar.register(
             fact: fact("/Volumes/Files/本/[作者] 題名.zip"),
             kind: .pageCountedArchive,
-            targetShelfID: shelf.id,
+            targetShelf: shelf,
             index: index,
             volumesByPath: &volumes
         )
@@ -197,9 +197,9 @@ struct LibraryRegistrarTests {
 
         let index = LibraryRegistrationIndex()
         var volumes: [String: Volume] = [:]
-        let first = registrar.register(fact: dropped, kind: .pageCountedArchive, targetShelfID: shelf.id,
+        let first = registrar.register(fact: dropped, kind: .pageCountedArchive, targetShelf: shelf,
                                        index: index, volumesByPath: &volumes)
-        let second = registrar.register(fact: dropped, kind: .pageCountedArchive, targetShelfID: shelf.id,
+        let second = registrar.register(fact: dropped, kind: .pageCountedArchive, targetShelf: shelf,
                                         index: index, volumesByPath: &volumes)
 
         #expect(first.isNew)
@@ -223,7 +223,7 @@ struct LibraryRegistrarTests {
         _ = registrar.register(
             fact: fact("/Volumes/Files/本/巻1.zip"),
             kind: .pageCountedArchive,
-            targetShelfID: smart.id,
+            targetShelf: smart,
             index: index,
             volumesByPath: &volumes
         )
@@ -262,14 +262,14 @@ struct LibraryRegistrarTests {
         let archive = registrar.register(
             fact: fact("/Volumes/Files/本/巻1.zip"),
             kind: .pageCountedArchive,
-            targetShelfID: nil,
+            targetShelf: nil,
             index: index,
             volumesByPath: &volumes
         )
         let movie = registrar.register(
             fact: fact("/Volumes/Files/本/映像.mov"),
             kind: .helperFile,
-            targetShelfID: nil,
+            targetShelf: nil,
             index: index,
             volumesByPath: &volumes
         )
@@ -278,11 +278,14 @@ struct LibraryRegistrarTests {
         // A movie has no pages to count, so nothing is asked of the share.
         #expect(movie.pageCount == nil)
 
-        registrar.apply(DroppedFilePageCountUpdate(
-            itemID: archive.itemID,
-            pageCount: 120,
-            shouldApplyAutoBookType: true
-        ))
+        registrar.apply(
+            DroppedFilePageCountUpdate(
+                itemID: archive.itemID,
+                pageCount: 120,
+                shouldApplyAutoBookType: true
+            ),
+            index: index
+        )
         let item = try #require(
             try context.fetch(FetchDescriptor<Item>()).first { $0.id == archive.itemID }
         )
@@ -309,11 +312,64 @@ struct LibraryRegistrarTests {
         let outcome = named.register(
             fact: fact("/Volumes/Files/本/[薄い本] 題名.zip"),
             kind: .pageCountedArchive,
-            targetShelfID: nil,
+            targetShelf: nil,
             index: index,
             volumesByPath: &volumes
         )
 
         #expect(outcome.pageCount?.shouldApplyAutoBookType == false)
+    }
+}
+
+/// The index registration asks about, which the projection keeps.
+@MainActor
+struct LibraryRegistrationIndexTests {
+    @Test func aBookRegisteredIsFoundByTheNextFileInTheSameDrop() throws {
+        // What stops the same file, dropped twice in one go, becoming two books.
+        let schema = Schema(LibraryStore.libraryModels + LibraryStore.localModels)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        )
+        let vault = BookmarkVault()
+        vault.attach(to: container)
+        let registrar = LibraryRegistrar(
+            context: container.mainContext,
+            vault: vault,
+            settings: LibraryRegistrar.Settings(
+                renameFormat: "@title",
+                typeNames: ["厚い本", "薄い本", "本の一部", "画像セット", "テキスト", "ムービー"],
+                helperExtensions: ["zip"]
+            )
+        )
+
+        let index = LibraryRegistrationIndex()
+        var volumes: [String: Volume] = [:]
+        let fact = DroppedFileFact(
+            url: URL(fileURLWithPath: "/Volumes/Files/本/巻1.zip"),
+            exists: true,
+            isDirectory: false,
+            bookmarkData: nil
+        )
+
+        let first = registrar.register(fact: fact, kind: .pageCountedArchive, targetShelf: nil,
+                                       index: index, volumesByPath: &volumes)
+        #expect(index.itemsByPath["本/巻1.zip"] != nil)
+
+        let second = registrar.register(fact: fact, kind: .pageCountedArchive, targetShelf: nil,
+                                        index: index, volumesByPath: &volumes)
+        #expect(second.itemID == first.itemID)
+        #expect(!second.isNew)
+    }
+
+    @Test func forgettingABookTakesItsPathWithIt() {
+        let item = Item(relativePath: "本/巻1.zip", title: "巻1")
+        let index = LibraryRegistrationIndex()
+        index.replace(models: [item.id: item], snapshots: [])
+
+        index.remove(item.id)
+
+        #expect(index.itemsByPath["本/巻1.zip"] == nil)
+        #expect(index.models.isEmpty)
     }
 }

@@ -312,6 +312,10 @@ struct ContentView: View {
     /// of notifications, and acting on each one separately is what starved the
     /// projection: every refresh cancelled the one before it.
     @State private var libraryRefreshTask: Task<Void, Never>?
+    /// What registration asks "is this path already here?" against. Kept with
+    /// the projection rather than built per drop: it is the whole library, and
+    /// walking it is the kind of pause a person sees in the cursor.
+    @State private var registrationIndex = LibraryRegistrationIndex()
     /// The search the list currently shows the results of, so a change that is
     /// not a keystroke can be answered without waiting.
     @State private var lastProjectedSearchText = ""
@@ -2160,6 +2164,9 @@ struct ContentView: View {
         pendingUpdatedItemIDs.removeAll()
     }
 
+    /// How many files are registered between two redraws of the drop counter.
+    private static let dropProgressStride = 16
+
     /// How long the library is left to settle before the list is rebuilt from it.
     ///
     /// An iCloud import arrives as a stream of changes rather than one, and
@@ -2228,6 +2235,7 @@ struct ContentView: View {
                     }
                     projectionItems = snapshot.items
                     projectionModels = models
+                    registrationIndex.replace(models: models, snapshots: snapshot.items)
                     var snapshotIndices: [UUID: Int] = [:]
                     snapshotIndices.reserveCapacity(snapshot.items.count)
                     for (index, item) in snapshot.items.enumerated() {
@@ -2580,34 +2588,50 @@ struct ContentView: View {
             dropQueueRemaining = facts.count
             var lastAddedID: UUID?
             var pageCounts: [DroppedFilePageCountRequest] = []
-            let registrationIndex = LibraryRegistrationIndex()
-            registrationIndex.replace(
-                models: Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
-                snapshots: []
-            )
+            // The index is the projection's, already built. Only a drop that
+            // beats the first projection has to pay for one.
+            if registrationIndex.models.isEmpty, !allItems.isEmpty {
+                registrationIndex.replace(
+                    models: Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
+                    snapshots: []
+                )
+            }
             var volumesByPath = Dictionary(
                 ((try? modelContext.fetch(FetchDescriptor<Volume>())) ?? []).map { ($0.lastKnownPath, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
 
             let registrar = libraryRegistrar
-            for fact in facts {
-                defer { dropQueueRemaining -= 1 }
-                guard let kind = registrar.kind(for: fact) else { continue }
+            // Once for the drop, not once per file: this is a query against the
+            // store, and a drop may be thousands of files long.
+            let targetShelf = registrar.shelf(withID: targetShelfID)
+
+            for (position, fact) in facts.enumerated() {
+                guard let kind = registrar.kind(for: fact) else {
+                    dropQueueRemaining -= 1
+                    continue
+                }
 
                 let outcome = registrar.register(
                     fact: fact,
                     kind: kind,
-                    targetShelfID: targetShelfID,
+                    targetShelf: targetShelf,
                     index: registrationIndex,
                     volumesByPath: &volumesByPath
                 )
                 if outcome.isNew { lastAddedID = outcome.itemID }
                 if let request = outcome.pageCount { pageCounts.append(request) }
 
-                // Yield so the progress counter keeps up.
-                await Task.yield()
+                // The counter is a reassurance, not a readout, and every change
+                // to it redraws. Moving it in steps — and yielding with it — is
+                // what leaves the cursor's own animation a share of the actor it
+                // is drawn on.
+                if position.isMultiple(of: Self.dropProgressStride) || position == facts.count - 1 {
+                    dropQueueRemaining = facts.count - position - 1
+                    await Task.yield()
+                }
             }
+            dropQueueRemaining = 0
 
             BookmarkVault.shared.savePendingChanges()
             try? modelContext.save()
@@ -2620,7 +2644,7 @@ struct ContentView: View {
             guard !pageCounts.isEmpty else { return }
             let updates = await DroppedFilePageCounter.count(pageCounts)
             for update in updates {
-                registrar.apply(update)
+                registrar.apply(update, index: registrationIndex)
             }
             try? modelContext.save()
         }
