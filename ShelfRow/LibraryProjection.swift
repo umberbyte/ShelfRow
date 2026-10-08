@@ -354,6 +354,17 @@ nonisolated enum LibraryRefreshDecision {
     }
 }
 
+extension LibraryRefreshDecision {
+    /// Whether to let the input settle before projecting.
+    ///
+    /// Typing is the only thing that arrives faster than the list can be built,
+    /// and the only thing that should wait. Changing shelf is one event, and
+    /// waiting on it is felt immediately.
+    static func settlesFirst(searchText: String, lastProjectedSearchText: String) -> Bool {
+        searchText != lastProjectedSearchText
+    }
+}
+
 nonisolated enum LibraryRefreshPolicy {
     static let maximumPatchedItems = 128
 

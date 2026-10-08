@@ -312,6 +312,9 @@ struct ContentView: View {
     /// of notifications, and acting on each one separately is what starved the
     /// projection: every refresh cancelled the one before it.
     @State private var libraryRefreshTask: Task<Void, Never>?
+    /// The search the list currently shows the results of, so a change that is
+    /// not a keystroke can be answered without waiting.
+    @State private var lastProjectedSearchText = ""
     @State private var isUpdatingLibrary = false
     @State private var hasLoadedLibrary = false
     @State private var unreadCount = 0
@@ -1502,7 +1505,13 @@ struct ContentView: View {
         // Recompute the (cached) filtered/sorted list only when inputs change,
         // not on every selection/keystroke elsewhere.
         .onChange(of: displayToken) { _, _ in
-            refreshDisplayItems()
+            refreshDisplayItems(
+                reason: .request,
+                settleFirst: LibraryRefreshDecision.settlesFirst(
+                    searchText: searchText,
+                    lastProjectedSearchText: lastProjectedSearchText
+                )
+            )
         }
         .onReceive(LibraryNotifications.modelSaves()) { event in
             handleModelSave(event)
@@ -2169,7 +2178,7 @@ struct ContentView: View {
             try? await Task.sleep(for: Self.librarySettleInterval)
             libraryRefreshTask = nil
             guard !Task.isCancelled else { return }
-            refreshDisplayItems(reason: .library)
+            refreshDisplayItems(reason: .library, settleFirst: false)
         }
     }
 
@@ -2178,11 +2187,16 @@ struct ContentView: View {
     /// Capture SwiftData only when the library generation changes. Search, filter
     /// and sort changes reuse the value snapshots and model lookup table, then run
     /// the projection off the UI actor.
-    private func refreshDisplayItems(reason: LibraryRefreshReason = .request) {
+    private func refreshDisplayItems(reason: LibraryRefreshReason = .request, settleFirst: Bool = false) {
         projectionTask?.cancel()
         projectionTask = Task { @MainActor in
             do {
-                try await Task.sleep(for: .milliseconds(120))
+                // Only typing needs settling, and only because each keystroke
+                // would otherwise project the whole library. Changing shelf is
+                // one event and should be answered at once.
+                if settleFirst {
+                    try await Task.sleep(for: .milliseconds(120))
+                }
                 isUpdatingLibrary = true
                 let generation = libraryGeneration
                 let requestToken = displayToken
@@ -2256,7 +2270,12 @@ struct ContentView: View {
                     values,
                     shelves: shelfValues,
                     request: request,
-                    generation: generation
+                    // The snapshot's generation, not the library's. The worker
+                    // keeps a sorted copy of what it was last given, and the
+                    // library's number changes with every arriving sync change —
+                    // handing it that threw the sort away on each projection and
+                    // re-sorted twenty thousand books to change shelf.
+                    generation: snapshotGeneration
                 )
                 try Task.checkCancellation()
                 // The library may have moved while this was projected. What was
@@ -2271,6 +2290,7 @@ struct ContentView: View {
                 if generation != libraryGeneration {
                     scheduleLibraryRefresh()
                 }
+                lastProjectedSearchText = searchText
                 let orderedItems = result.ids.compactMap { projectionModels[$0] }
                 displayItems = orderedItems
                 displayRows = orderedItems.enumerated().map { LibraryDisplayRow(id: $0.element.id, index: $0.offset, item: $0.element) }

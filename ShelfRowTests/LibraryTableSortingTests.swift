@@ -119,3 +119,18 @@ struct LibraryRefreshDecisionTests {
         ))
     }
 }
+
+/// Whether to let the input settle before rebuilding the list.
+struct LibraryRefreshSettlingTests {
+    @Test func typingWaits() {
+        // Each keystroke would otherwise project the whole library.
+        #expect(LibraryRefreshDecision.settlesFirst(searchText: "ab", lastProjectedSearchText: "a"))
+        #expect(LibraryRefreshDecision.settlesFirst(searchText: "", lastProjectedSearchText: "a"))
+    }
+
+    @Test func changingShelfDoesNot() {
+        // One event, and the wait is felt immediately.
+        #expect(!LibraryRefreshDecision.settlesFirst(searchText: "a", lastProjectedSearchText: "a"))
+        #expect(!LibraryRefreshDecision.settlesFirst(searchText: "", lastProjectedSearchText: ""))
+    }
+}
