@@ -323,6 +323,37 @@ nonisolated enum LibrarySnapshotLoader {
     }
 }
 
+/// Why the list is being rebuilt.
+nonisolated enum LibraryRefreshReason: Sendable {
+    /// The shelf, the search, a filter or the sort order changed. The books are
+    /// the same ones; only which of them to show has changed.
+    case request
+    /// The library itself changed.
+    case library
+}
+
+/// Whether rebuilding the list has to read the library again.
+///
+/// The distinction matters most while iCloud is importing. Reading the library
+/// takes longer than the gap between the changes arriving, so a rebuild that
+/// insists on a fresh read is cancelled and restarted indefinitely — and a
+/// person switching shelves in the meantime sees nothing happen at all. A shelf
+/// change does not need the read: the books it chooses among are already in
+/// hand, and whatever arrived since will come with the next library rebuild.
+nonisolated enum LibraryRefreshDecision {
+    static func needsSnapshot(
+        reason: LibraryRefreshReason,
+        snapshotGeneration: UInt64,
+        libraryGeneration: UInt64,
+        requiresFullSnapshot: Bool
+    ) -> Bool {
+        // Nothing to project from yet: everyone waits for the first read.
+        guard snapshotGeneration != 0 else { return true }
+        guard reason == .library else { return false }
+        return requiresFullSnapshot || snapshotGeneration != libraryGeneration
+    }
+}
+
 nonisolated enum LibraryRefreshPolicy {
     static let maximumPatchedItems = 128
 

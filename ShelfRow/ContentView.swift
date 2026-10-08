@@ -308,6 +308,10 @@ struct ContentView: View {
     @State private var displayListGeneration: UInt64 = 0
     @State private var libraryItemCount = 0
     @State private var projectionTask: Task<Void, Never>?
+    /// A library refresh waiting its turn. iCloud delivers an import in a stream
+    /// of notifications, and acting on each one separately is what starved the
+    /// projection: every refresh cancelled the one before it.
+    @State private var libraryRefreshTask: Task<Void, Never>?
     @State private var isUpdatingLibrary = false
     @State private var hasLoadedLibrary = false
     @State private var unreadCount = 0
@@ -1505,11 +1509,12 @@ struct ContentView: View {
         }
         .onReceive(LibraryNotifications.remoteChanges()) { _ in
             markLibrarySnapshotDirty()
-            refreshDisplayItems()
+            scheduleLibraryRefresh()
             thumbnailDistribution.scheduleAutomaticWork()
         }
         .onDisappear {
             projectionTask?.cancel()
+            libraryRefreshTask?.cancel()
             coverPrefetchTask?.cancel()
         }
         .overlay(alignment: .topTrailing) {
@@ -2097,7 +2102,7 @@ struct ContentView: View {
         guard !allChanged.isEmpty else {
             if event.contextID == ObjectIdentifier(modelContext) {
                 markLibrarySnapshotDirty()
-                refreshDisplayItems()
+                scheduleLibraryRefresh()
             }
             return
         }
@@ -2134,7 +2139,10 @@ struct ContentView: View {
                 pendingUpdatedItemIDs.removeAll()
             }
         }
-        refreshDisplayItems()
+        // A save of our own — a drop, an edit — goes through the same settling
+        // as one arriving from iCloud. During an import both are happening at
+        // once, and it is the pile of them that starves the list.
+        scheduleLibraryRefresh()
     }
 
     private func markLibrarySnapshotDirty() {
@@ -2143,25 +2151,57 @@ struct ContentView: View {
         pendingUpdatedItemIDs.removeAll()
     }
 
+    /// How long the library is left to settle before the list is rebuilt from it.
+    ///
+    /// An iCloud import arrives as a stream of changes rather than one, and
+    /// rebuilding on each is both wasted work and, worse, self-defeating: the
+    /// rebuild takes longer than the gap between notifications, so it is
+    /// cancelled and restarted forever and the list never changes at all.
+    private static let librarySettleInterval = Duration.milliseconds(900)
+
+    /// Asks for a rebuild from the library, at most one at a time.
+    ///
+    /// Already waiting means the change is already covered — the snapshot is
+    /// taken when the timer fires, not when it was set.
+    private func scheduleLibraryRefresh() {
+        guard libraryRefreshTask == nil else { return }
+        libraryRefreshTask = Task { @MainActor in
+            try? await Task.sleep(for: Self.librarySettleInterval)
+            libraryRefreshTask = nil
+            guard !Task.isCancelled else { return }
+            refreshDisplayItems(reason: .library)
+        }
+    }
+
+
+
     /// Capture SwiftData only when the library generation changes. Search, filter
     /// and sort changes reuse the value snapshots and model lookup table, then run
     /// the projection off the UI actor.
-    private func refreshDisplayItems() {
+    private func refreshDisplayItems(reason: LibraryRefreshReason = .request) {
         projectionTask?.cancel()
         projectionTask = Task { @MainActor in
             do {
                 try await Task.sleep(for: .milliseconds(120))
                 isUpdatingLibrary = true
                 let generation = libraryGeneration
+                let requestToken = displayToken
 
-                if requiresFullProjectionSnapshot || snapshotGeneration == 0 {
+                let needsSnapshot = LibraryRefreshDecision.needsSnapshot(
+                    reason: reason,
+                    snapshotGeneration: snapshotGeneration,
+                    libraryGeneration: generation,
+                    requiresFullSnapshot: requiresFullProjectionSnapshot
+                )
+
+                if needsSnapshot, requiresFullProjectionSnapshot || snapshotGeneration == 0 {
                     let snapshot = try await LibrarySnapshotLoader.read(
                         modelContainer: modelContext.container
                     )
                     try Task.checkCancellation()
                     guard generation == libraryGeneration else {
                         isUpdatingLibrary = false
-                        refreshDisplayItems()
+                        scheduleLibraryRefresh()
                         return
                     }
 
@@ -2184,7 +2224,7 @@ struct ContentView: View {
                     requiresFullProjectionSnapshot = false
                     pendingUpdatedItemIDs.removeAll()
                     snapshotGeneration = generation
-                } else if snapshotGeneration != generation {
+                } else if needsSnapshot, snapshotGeneration != generation {
                     for itemID in pendingUpdatedItemIDs {
                         guard let index = projectionIndices[itemID],
                               projectionItems.indices.contains(index),
@@ -2196,7 +2236,7 @@ struct ContentView: View {
                     }
                     if requiresFullProjectionSnapshot {
                         isUpdatingLibrary = false
-                        refreshDisplayItems()
+                        scheduleLibraryRefresh()
                         return
                     }
                     pendingUpdatedItemIDs.removeAll()
@@ -2219,10 +2259,17 @@ struct ContentView: View {
                     generation: generation
                 )
                 try Task.checkCancellation()
-                guard generation == libraryGeneration else {
+                // The library may have moved while this was projected. What was
+                // asked for is still what is wanted, so it is shown; the pending
+                // library refresh will bring the rest along. Discarding it here
+                // is what left the list frozen on the old shelf for as long as a
+                // sync lasted.
+                guard requestToken == displayToken else {
                     isUpdatingLibrary = false
-                    refreshDisplayItems()
                     return
+                }
+                if generation != libraryGeneration {
+                    scheduleLibraryRefresh()
                 }
                 let orderedItems = result.ids.compactMap { projectionModels[$0] }
                 displayItems = orderedItems

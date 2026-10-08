@@ -68,3 +68,54 @@ struct LibraryTableScrollTargetTests {
         #expect(LibraryTableScrollTarget.row(for: UUID(), in: []) == nil)
     }
 }
+
+/// When rebuilding the list has to read the library again.
+struct LibraryRefreshDecisionTests {
+    @Test func theFirstRebuildAlwaysReads() {
+        // Nothing to project from yet, whatever asked for it.
+        for reason in [LibraryRefreshReason.request, .library] {
+            #expect(LibraryRefreshDecision.needsSnapshot(
+                reason: reason,
+                snapshotGeneration: 0,
+                libraryGeneration: 5,
+                requiresFullSnapshot: false
+            ))
+        }
+    }
+
+    @Test func switchingShelvesNeverWaitsOnTheLibrary() {
+        // The point of the distinction: during an iCloud import the library is
+        // changing constantly, and a shelf change that insisted on a fresh read
+        // would never finish one.
+        #expect(!LibraryRefreshDecision.needsSnapshot(
+            reason: .request,
+            snapshotGeneration: 3,
+            libraryGeneration: 99,
+            requiresFullSnapshot: true
+        ))
+    }
+
+    @Test func aChangedLibraryIsReadAgain() {
+        #expect(LibraryRefreshDecision.needsSnapshot(
+            reason: .library,
+            snapshotGeneration: 3,
+            libraryGeneration: 4,
+            requiresFullSnapshot: false
+        ))
+        #expect(LibraryRefreshDecision.needsSnapshot(
+            reason: .library,
+            snapshotGeneration: 3,
+            libraryGeneration: 3,
+            requiresFullSnapshot: true
+        ))
+    }
+
+    @Test func aLibraryAlreadyInHandIsNotReadTwice() {
+        #expect(!LibraryRefreshDecision.needsSnapshot(
+            reason: .library,
+            snapshotGeneration: 7,
+            libraryGeneration: 7,
+            requiresFullSnapshot: false
+        ))
+    }
+}
