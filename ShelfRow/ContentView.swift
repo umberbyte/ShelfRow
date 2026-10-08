@@ -316,6 +316,13 @@ struct ContentView: View {
     /// the projection rather than built per drop: it is the whole library, and
     /// walking it is the kind of pause a person sees in the cursor.
     @State private var registrationIndex = LibraryRegistrationIndex()
+    /// Books this app added or removed itself, waiting to be folded into the
+    /// list. Knowing which ones they are is what makes a drop cost a few rows
+    /// rather than a re-read of the library.
+    @State private var pendingInsertedItemIDs: Set<UUID> = []
+    @State private var pendingRemovedItemIDs: Set<UUID> = []
+    /// Shelf membership changed. A few dozen shelves, read on their own.
+    @State private var pendingShelfReload = false
     /// The search the list currently shows the results of, so a change that is
     /// not a keystroke can be answered without waiting.
     @State private var lastProjectedSearchText = ""
@@ -2133,6 +2140,45 @@ struct ContentView: View {
         let updatedItemIdentifiers = updated.filter { isEntity($0, named: itemName) }
 
         libraryGeneration &+= 1
+
+        // A save of this app's own carries which objects it touched, so the list
+        // can be brought up to date by changing the rows that changed. Reading
+        // the library again — four seconds of it — is for when that is not
+        // possible.
+        let insertedItems = inserted.filter { isEntity($0, named: itemName) }
+        let removedItems = (deleted + invalidated).filter { isEntity($0, named: itemName) }
+        let shelvesTouched = (inserted + deleted + invalidated + updated)
+            .contains { isEntity($0, named: shelfName) }
+
+        if structuralChange, snapshotGeneration != 0 {
+            let arrived = insertedItems.compactMap { modelContext.model(for: $0) as? Item }
+            if arrived.count == insertedItems.count {
+                for item in arrived {
+                    pendingInsertedItemIDs.insert(item.id)
+                    registrationIndex.update(item, relativePath: item.relativePath)
+                    projectionModels[item.id] = item
+                }
+                // A removed book cannot be asked for its identifier any more, so
+                // what is gone is whatever the index knew and the library no
+                // longer has; that is settled when the fold happens.
+                if !removedItems.isEmpty {
+                    pendingRemovedItemIDs.formUnion(
+                        removedItems.compactMap { (modelContext.model(for: $0) as? Item)?.id }
+                    )
+                    if pendingRemovedItemIDs.count != removedItems.count {
+                        requiresFullProjectionSnapshot = true
+                    }
+                }
+                pendingShelfReload = pendingShelfReload || shelvesTouched
+                if !requiresFullProjectionSnapshot {
+                    scheduleLibraryRefresh()
+                    return
+                }
+            } else {
+                requiresFullProjectionSnapshot = true
+            }
+        }
+
         if LibraryRefreshPolicy.requiresFullSnapshot(
             hasStructuralChange: structuralChange,
             updatedItemCount: updatedItemIdentifiers.count,
@@ -2162,6 +2208,9 @@ struct ContentView: View {
         libraryGeneration &+= 1
         requiresFullProjectionSnapshot = true
         pendingUpdatedItemIDs.removeAll()
+        pendingInsertedItemIDs.removeAll()
+        pendingRemovedItemIDs.removeAll()
+        pendingShelfReload = false
     }
 
     /// How many files are registered between two redraws of the drop counter.
@@ -2215,10 +2264,13 @@ struct ContentView: View {
                     requiresFullSnapshot: requiresFullProjectionSnapshot
                 )
 
+                let snapshotStart = ContinuousClock.now
                 if needsSnapshot, requiresFullProjectionSnapshot || snapshotGeneration == 0 {
                     let snapshot = try await LibrarySnapshotLoader.read(
                         modelContainer: modelContext.container
                     )
+                    DropPerformanceLog.rebuild("snapshot read \(snapshot.items.count)", took: snapshotStart.duration(to: ContinuousClock.now))
+                    let modelsStart = ContinuousClock.now
                     try Task.checkCancellation()
                     guard generation == libraryGeneration else {
                         isUpdatingLibrary = false
@@ -2226,16 +2278,43 @@ struct ContentView: View {
                         return
                     }
 
-                    var models: [UUID: Item] = [:]
-                    models.reserveCapacity(allItems.count)
-                    for (index, item) in allItems.enumerated() {
-                        try Task.checkCancellation()
-                        models[item.id] = item
-                        if index.isMultiple(of: 128) { await Task.yield() }
+                    // The models are the same objects as last time unless books
+                    // have come or gone. Asking every one of them for its
+                    // identifier again — nineteen thousand faults on the actor
+                    // drawing the window — is what a sync spent its seconds on.
+                    var models = projectionModels
+                    let wanted = Set(snapshot.items.map(\.id))
+                    if Set(models.keys) != wanted {
+                        models = models.filter { wanted.contains($0.key) }
+                        let missing = Array(wanted.subtracting(models.keys))
+
+                        // A drop adds a handful; ask for those by name. Walking
+                        // the whole library to find three books is the pause
+                        // that follows a drop.
+                        let arrived = missing.isEmpty ? [] : (try? modelContext.fetch(
+                            FetchDescriptor<Item>(predicate: #Predicate { missing.contains($0.id) })
+                        )) ?? []
+
+                        if arrived.count == missing.count {
+                            for item in arrived { models[item.id] = item }
+                        } else {
+                            // Whatever the fetch could not answer — a predicate
+                            // this store will not take, say — is worth the walk.
+                            models.reserveCapacity(wanted.count)
+                            for (index, item) in allItems.enumerated() {
+                                try Task.checkCancellation()
+                                if models[item.id] == nil, wanted.contains(item.id) {
+                                    models[item.id] = item
+                                }
+                                if index.isMultiple(of: 128) { await Task.yield() }
+                            }
+                        }
                     }
+                    DropPerformanceLog.rebuild("snapshot models \(models.count)", took: modelsStart.duration(to: ContinuousClock.now))
                     projectionItems = snapshot.items
                     projectionModels = models
                     registrationIndex.replace(models: models, snapshots: snapshot.items)
+                    DropPerformanceLog.rebuild("snapshot \(snapshot.items.count)", took: snapshotStart.duration(to: ContinuousClock.now))
                     var snapshotIndices: [UUID: Int] = [:]
                     snapshotIndices.reserveCapacity(snapshot.items.count)
                     for (index, item) in snapshot.items.enumerated() {
@@ -2245,8 +2324,45 @@ struct ContentView: View {
                     projectionShelves = snapshot.shelves
                     requiresFullProjectionSnapshot = false
                     pendingUpdatedItemIDs.removeAll()
+                    pendingInsertedItemIDs.removeAll()
+                    pendingRemovedItemIDs.removeAll()
+                    pendingShelfReload = false
                     snapshotGeneration = generation
                 } else if needsSnapshot, snapshotGeneration != generation {
+                    // Books this app added or removed: a few rows, not a library.
+                    if !pendingInsertedItemIDs.isEmpty || !pendingRemovedItemIDs.isEmpty {
+                        if !pendingRemovedItemIDs.isEmpty {
+                            let gone = pendingRemovedItemIDs
+                            projectionItems.removeAll { gone.contains($0.id) }
+                            for itemID in gone {
+                                projectionModels[itemID] = nil
+                                registrationIndex.remove(itemID)
+                            }
+                        }
+                        for itemID in pendingInsertedItemIDs {
+                            guard let item = projectionModels[itemID] else {
+                                requiresFullProjectionSnapshot = true
+                                break
+                            }
+                            projectionItems.append(LibraryItemSnapshot(item))
+                        }
+                        var rebuiltIndices: [UUID: Int] = [:]
+                        rebuiltIndices.reserveCapacity(projectionItems.count)
+                        for (position, item) in projectionItems.enumerated() {
+                            rebuiltIndices[item.id] = position
+                        }
+                        projectionIndices = rebuiltIndices
+                        pendingInsertedItemIDs.removeAll()
+                        pendingRemovedItemIDs.removeAll()
+                    }
+
+                    if pendingShelfReload, !requiresFullProjectionSnapshot {
+                        projectionShelves = try await LibrarySnapshotLoader.readShelves(
+                            modelContainer: modelContext.container
+                        )
+                        pendingShelfReload = false
+                    }
+
                     for itemID in pendingUpdatedItemIDs {
                         guard let index = projectionIndices[itemID],
                               projectionItems.indices.contains(index),
@@ -2274,6 +2390,7 @@ struct ContentView: View {
                     ratings: ratingFilterSelection, types: typeFilterSelection,
                     sortKey: sortKey, ascending: sortAscending
                 )
+                let projectionStart = ContinuousClock.now
                 let result = try await LibraryProjectionWorker.shared.project(
                     values,
                     shelves: shelfValues,
@@ -2299,6 +2416,7 @@ struct ContentView: View {
                     scheduleLibraryRefresh()
                 }
                 lastProjectedSearchText = searchText
+                DropPerformanceLog.rebuild("project \(values.count)", took: projectionStart.duration(to: ContinuousClock.now))
                 let orderedItems = result.ids.compactMap { projectionModels[$0] }
                 displayItems = orderedItems
                 displayRows = orderedItems.enumerated().map { LibraryDisplayRow(id: $0.element.id, index: $0.offset, item: $0.element) }
@@ -2582,8 +2700,19 @@ struct ContentView: View {
             // asked once whether it exists, what it is, and for the bookmark
             // that keeps access to it. A share answers slowly, and none of it
             // needs the main actor.
+            let clock = ContinuousClock()
+            let began = clock.now
+            var mark = began
+            func elapsed(_ stage: String) {
+                let now = clock.now
+                DropPerformanceLog.stage(stage, took: mark.duration(to: now), since: began.duration(to: now))
+                mark = now
+            }
+
             let urls = await DroppedFileProviderLoader.urls(from: providers)
+            elapsed("providers")
             let facts = await DroppedFilePreflight.inspect(urls: urls)
+            elapsed("preflight")
 
             dropQueueRemaining = facts.count
             var lastAddedID: UUID?
@@ -2632,9 +2761,12 @@ struct ContentView: View {
                 }
             }
             dropQueueRemaining = 0
+            elapsed("register \(facts.count)")
 
             BookmarkVault.shared.savePendingChanges()
+            elapsed("bookmarks")
             try? modelContext.save()
+            elapsed("save")
             if let lastAddedID {
                 selection.selectRegisteredItem(lastAddedID)
             }
@@ -2643,6 +2775,7 @@ struct ContentView: View {
             // books into the window rather than holding them back.
             guard !pageCounts.isEmpty else { return }
             let updates = await DroppedFilePageCounter.count(pageCounts)
+            elapsed("pages \(pageCounts.count)")
             for update in updates {
                 registrar.apply(update, index: registrationIndex)
             }

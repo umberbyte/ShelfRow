@@ -282,6 +282,15 @@ actor LibrarySnapshotReader {
             if index.isMultiple(of: 256) { await Task.yield() }
         }
 
+        return LibrarySnapshotPayload(items: items, shelves: try readShelves())
+    }
+
+    /// The shelves alone.
+    ///
+    /// Dropping a file onto a shelf changes which books it holds, and nothing
+    /// else — re-reading nineteen thousand books to learn that costs seconds.
+    /// There are a few dozen shelves.
+    func readShelves() throws -> [LibraryShelfSnapshot] {
         let shelfModels = try modelContext.fetch(FetchDescriptor<Shelf>())
         var shelves: [LibraryShelfSnapshot] = []
         shelves.reserveCapacity(shelfModels.count)
@@ -297,7 +306,7 @@ actor LibrarySnapshotReader {
                 )
             )
         }
-        return LibrarySnapshotPayload(items: items, shelves: shelves)
+        return shelves
     }
 
     nonisolated func isExecutingOnMainThread() async -> Bool {
@@ -320,6 +329,13 @@ nonisolated enum LibrarySnapshotLoader {
         let reader = await makeReader(modelContainer: modelContainer)
         try Task.checkCancellation()
         return try await reader.read()
+    }
+
+    /// Just the shelves, for when only shelf membership has changed.
+    nonisolated static func readShelves(modelContainer: ModelContainer) async throws -> [LibraryShelfSnapshot] {
+        let reader = await makeReader(modelContainer: modelContainer)
+        try Task.checkCancellation()
+        return try await reader.readShelves()
     }
 }
 
@@ -530,5 +546,35 @@ actor LibraryProjectionWorker {
         if primary != .orderedSame { return primary }
         let title = a.title.localizedStandardCompare(b.title)
         return title == .orderedSame ? ordered(a.id.uuidString, b.id.uuidString) : title
+    }
+}
+
+/// Timings for the path between letting go of a drag and the list settling.
+///
+/// Kept in the app rather than in a profiler because the costs that matter here
+/// only appear against a real library on a real share, on someone else's
+/// machine. Written at info level so it survives in the system log without
+/// anyone having to be attached when it happens.
+nonisolated enum DropPerformanceLog {
+    private static let logger = Logger(subsystem: "com.eureka.ShelfRow", category: "DropPerformance")
+
+    /// A stage of the drop itself. Kept at info — a drop is an event, and these
+    /// are the numbers anyone asking "why is this slow?" needs first.
+    static func stage(_ name: String, took: Duration, since start: Duration) {
+        logger.info("""
+            \(name, privacy: .public): \(milliseconds(took), privacy: .public)ms \
+            (elapsed \(milliseconds(start), privacy: .public)ms)
+            """)
+    }
+
+    /// Rebuilding the list, which also happens on every shelf change. At debug,
+    /// so following a sync does not fill the log of someone who is only using
+    /// the app.
+    static func rebuild(_ name: String, took: Duration) {
+        logger.debug("\(name, privacy: .public): \(milliseconds(took), privacy: .public)ms")
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Int {
+        Int(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }
 }
