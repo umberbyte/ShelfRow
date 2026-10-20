@@ -735,6 +735,23 @@ struct ContentView: View {
                         .textFieldStyle(.plain)
                         .font(displayMetrics.font(14))
                         .foregroundStyle(primaryTextColor)
+
+                    // Only while there is something to clear. A button that is
+                    // always there, and does nothing most of the time, is one
+                    // more thing to read past.
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(displayMetrics.font(13))
+                                .foregroundStyle(tertiaryTextColor)
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(Circle())
+                        .help("検索をクリア")
+                        .accessibilityLabel("検索をクリア")
+                    }
                 }
                 .padding(.horizontal, displayMetrics.space(12))
                 .frame(width: displayMetrics.size(300), height: displayMetrics.size(36))
