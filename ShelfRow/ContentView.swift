@@ -316,11 +316,10 @@ struct ContentView: View {
     /// the projection rather than built per drop: it is the whole library, and
     /// walking it is the kind of pause a person sees in the cursor.
     @State private var registrationIndex = LibraryRegistrationIndex()
-    /// Books this app added or removed itself, waiting to be folded into the
-    /// list. Knowing which ones they are is what makes a drop cost a few rows
-    /// rather than a re-read of the library.
+    /// Books this app added itself, waiting to be folded into the list. Knowing
+    /// which ones they are is what makes a drop cost a few rows rather than a
+    /// re-read of the library.
     @State private var pendingInsertedItemIDs: Set<UUID> = []
-    @State private var pendingRemovedItemIDs: Set<UUID> = []
     /// Shelf membership changed. A few dozen shelves, read on their own.
     @State private var pendingShelfReload = false
     /// The search the list currently shows the results of, so a change that is
@@ -2150,7 +2149,11 @@ struct ContentView: View {
         let shelvesTouched = (inserted + deleted + invalidated + updated)
             .contains { isEntity($0, named: shelfName) }
 
-        if structuralChange, snapshotGeneration != 0 {
+        if LibraryRefreshDecision.canFoldStructuralChange(
+            hasSnapshot: snapshotGeneration != 0,
+            insertedItemCount: insertedItems.count,
+            removedItemCount: removedItems.count
+        ) {
             let arrived = insertedItems.compactMap { modelContext.model(for: $0) as? Item }
             if arrived.count == insertedItems.count {
                 for item in arrived {
@@ -2158,25 +2161,16 @@ struct ContentView: View {
                     registrationIndex.update(item, relativePath: item.relativePath)
                     projectionModels[item.id] = item
                 }
-                // A removed book cannot be asked for its identifier any more, so
-                // what is gone is whatever the index knew and the library no
-                // longer has; that is settled when the fold happens.
-                if !removedItems.isEmpty {
-                    pendingRemovedItemIDs.formUnion(
-                        removedItems.compactMap { (modelContext.model(for: $0) as? Item)?.id }
-                    )
-                    if pendingRemovedItemIDs.count != removedItems.count {
-                        requiresFullProjectionSnapshot = true
-                    }
-                }
                 pendingShelfReload = pendingShelfReload || shelvesTouched
-                if !requiresFullProjectionSnapshot {
-                    scheduleLibraryRefresh()
-                    return
-                }
-            } else {
-                requiresFullProjectionSnapshot = true
+                scheduleLibraryRefresh()
+                return
             }
+            requiresFullProjectionSnapshot = true
+        } else if structuralChange {
+            // Books that have gone cannot say which ones they were: reading any
+            // property of a deleted model traps, including its identifier. The
+            // library is read again, which is what deletion still costs.
+            requiresFullProjectionSnapshot = true
         }
 
         if LibraryRefreshPolicy.requiresFullSnapshot(
@@ -2209,7 +2203,6 @@ struct ContentView: View {
         requiresFullProjectionSnapshot = true
         pendingUpdatedItemIDs.removeAll()
         pendingInsertedItemIDs.removeAll()
-        pendingRemovedItemIDs.removeAll()
         pendingShelfReload = false
     }
 
@@ -2325,20 +2318,11 @@ struct ContentView: View {
                     requiresFullProjectionSnapshot = false
                     pendingUpdatedItemIDs.removeAll()
                     pendingInsertedItemIDs.removeAll()
-                    pendingRemovedItemIDs.removeAll()
                     pendingShelfReload = false
                     snapshotGeneration = generation
                 } else if needsSnapshot, snapshotGeneration != generation {
                     // Books this app added or removed: a few rows, not a library.
-                    if !pendingInsertedItemIDs.isEmpty || !pendingRemovedItemIDs.isEmpty {
-                        if !pendingRemovedItemIDs.isEmpty {
-                            let gone = pendingRemovedItemIDs
-                            projectionItems.removeAll { gone.contains($0.id) }
-                            for itemID in gone {
-                                projectionModels[itemID] = nil
-                                registrationIndex.remove(itemID)
-                            }
-                        }
+                    if !pendingInsertedItemIDs.isEmpty {
                         for itemID in pendingInsertedItemIDs {
                             guard let item = projectionModels[itemID] else {
                                 requiresFullProjectionSnapshot = true
@@ -2353,7 +2337,6 @@ struct ContentView: View {
                         }
                         projectionIndices = rebuiltIndices
                         pendingInsertedItemIDs.removeAll()
-                        pendingRemovedItemIDs.removeAll()
                     }
 
                     if pendingShelfReload, !requiresFullProjectionSnapshot {

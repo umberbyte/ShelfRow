@@ -371,6 +371,21 @@ nonisolated enum LibraryRefreshDecision {
 }
 
 extension LibraryRefreshDecision {
+    /// Whether a save's structural change can be folded into the list instead of
+    /// reading the library again.
+    ///
+    /// Only arrivals can. A book that has gone cannot be asked which book it
+    /// was: reading any property of a deleted model — its identifier included —
+    /// traps. So a deletion is read back the long way, and it is rare enough to
+    /// be worth it.
+    static func canFoldStructuralChange(
+        hasSnapshot: Bool,
+        insertedItemCount: Int,
+        removedItemCount: Int
+    ) -> Bool {
+        hasSnapshot && removedItemCount == 0 && insertedItemCount > 0
+    }
+
     /// Whether to let the input settle before projecting.
     ///
     /// Typing is the only thing that arrives faster than the list can be built,

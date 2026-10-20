@@ -134,3 +134,37 @@ struct LibraryRefreshSettlingTests {
         #expect(!LibraryRefreshDecision.settlesFirst(searchText: "", lastProjectedSearchText: ""))
     }
 }
+
+/// Whether a save's structural change can be folded into the list.
+struct LibraryFoldDecisionTests {
+    @Test func arrivalsAreFolded() {
+        #expect(LibraryRefreshDecision.canFoldStructuralChange(
+            hasSnapshot: true, insertedItemCount: 1, removedItemCount: 0
+        ))
+    }
+
+    @Test func aDeletionIsNotFolded() {
+        // A deleted model cannot be asked which book it was — reading any of its
+        // properties traps — so there is no way to know what to take out of the
+        // list. Reading the library again is what deletion costs. Getting this
+        // wrong crashed the app on right-click, delete.
+        #expect(!LibraryRefreshDecision.canFoldStructuralChange(
+            hasSnapshot: true, insertedItemCount: 1, removedItemCount: 1
+        ))
+        #expect(!LibraryRefreshDecision.canFoldStructuralChange(
+            hasSnapshot: true, insertedItemCount: 0, removedItemCount: 1
+        ))
+    }
+
+    @Test func nothingIsFoldedIntoAListThatDoesNotExistYet() {
+        #expect(!LibraryRefreshDecision.canFoldStructuralChange(
+            hasSnapshot: false, insertedItemCount: 3, removedItemCount: 0
+        ))
+    }
+
+    @Test func aChangeWithNoArrivalsHasNothingToFold() {
+        #expect(!LibraryRefreshDecision.canFoldStructuralChange(
+            hasSnapshot: true, insertedItemCount: 0, removedItemCount: 0
+        ))
+    }
+}
