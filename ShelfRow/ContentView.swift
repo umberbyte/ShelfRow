@@ -2619,22 +2619,16 @@ struct ContentView: View {
             if let item = projectionModels[id] { startSlideshow(item) }
         case .open(let id):
             if let item = projectionModels[id] { openItem(item) }
-        case .delete(let id):
-            if let item = projectionModels[id] { deleteItem(item, trashFile: false) }
-        case .trash(let id):
-            if let item = projectionModels[id] { deleteItem(item, trashFile: true) }
-        case .setRating(let id, let rating):
-            guard let item = projectionModels[id], item.rating != rating else { return }
-            item.rating = rating
-            try? modelContext.save()
-        case .setBookType(let id, let type):
-            guard let item = projectionModels[id], item.bookType != type else { return }
-            item.bookType = type
-            try? modelContext.save()
-        case .toggleUnread(let id):
-            guard let item = projectionModels[id] else { return }
-            item.isUnread.toggle()
-            try? modelContext.save()
+        case .delete(let ids):
+            deleteItems(books(ids), trashFiles: false)
+        case .trash(let ids):
+            deleteItems(books(ids), trashFiles: true)
+        case .setRating(let ids, let rating):
+            setRating(rating, for: books(ids))
+        case .setBookType(let ids, let type):
+            setBookType(type, for: books(ids))
+        case .toggleUnread(let ids):
+            toggleUnread(for: books(ids))
         case .revealInFinder(let id):
             if let item = projectionModels[id] { revealInFinder(item) }
         case .moveFile(let id):
@@ -3173,30 +3167,146 @@ struct ContentView: View {
     }
 
     // MARK: - Item Context Menu (right-click, classic Stackroom)
+
+    /// The books an identifier list stands for, in the order they are shown.
+    private func books(_ ids: [UUID]) -> [Item] {
+        let wanted = Set(ids)
+        return displayItems.filter { wanted.contains($0.id) }
+    }
+
+    /// The books a context menu acts on: the selection when the click landed
+    /// inside it, and otherwise the one book clicked.
+    private func contextTargets(for item: Item) -> [Item] {
+        let ids = Set(LibraryContextTarget.ids(clicked: item.id, selection: selectedItemIDs))
+        guard ids.count > 1 else { return [item] }
+        return displayItems.filter { ids.contains($0.id) }
+    }
+
+    private func setRating(_ rating: Int, for items: [Item]) {
+        let changed = items.filter { $0.rating != rating }
+        guard !changed.isEmpty else { return }
+        for item in changed { item.rating = rating }
+        try? modelContext.save()
+    }
+
+    private func setBookType(_ type: Int, for items: [Item]) {
+        let changed = items.filter { $0.bookType != type }
+        guard !changed.isEmpty else { return }
+        for item in changed { item.bookType = type }
+        try? modelContext.save()
+    }
+
+    /// Marks them all read, or all unread.
+    ///
+    /// Toggling each one separately would leave a mixed selection mixed, only
+    /// the other way round, which is not what anyone means by it. The majority
+    /// decides, so the menu always changes something.
+    private func toggleUnread(for items: [Item]) {
+        guard !items.isEmpty else { return }
+        let markUnread = LibraryUnreadToggle.marksUnread(
+            unreadCount: items.filter(\.isUnread).count,
+            total: items.count
+        )
+        let changed = items.filter { $0.isUnread != markUnread }
+        guard !changed.isEmpty else { return }
+        for item in changed { item.isUnread = markUnread }
+        try? modelContext.save()
+    }
+
+    /// Deletes several at once, taking their files to the Trash first when asked.
+    private func deleteItems(_ items: [Item], trashFiles: Bool) {
+        guard !items.isEmpty else { return }
+        guard trashFiles else {
+            deleteItemsFromLibrary(items)
+            return
+        }
+
+        let resolved = items.compactMap { item -> (Item, ResolvedItemFile)? in
+            ItemFileAccess.resolve(item: item).map { (item, $0) }
+        }
+        guard !resolved.isEmpty else {
+            showMissingFileAlert = true
+            return
+        }
+
+        isPerformingFileOperation = true
+        let urls = resolved.map { ($0.0.id, $0.1.url) }
+        Task {
+            let failures = await Task.detached(priority: .userInitiated) {
+                var failed: [UUID] = []
+                for (id, url) in urls {
+                    do {
+                        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                    } catch {
+                        failed.append(id)
+                    }
+                }
+                return Set(failed)
+            }.value
+            for (_, access) in resolved { access.release() }
+            isPerformingFileOperation = false
+
+            let trashed = resolved.map(\.0).filter { !failures.contains($0.id) }
+            if !trashed.isEmpty { deleteItemsFromLibrary(trashed) }
+            if !failures.isEmpty {
+                openErrorMessage = "\(failures.count.formatted())件のファイルをゴミ箱に移動できませんでした。\n\n該当する書籍はライブラリに残しています。"
+            }
+        }
+    }
+
     @ViewBuilder
     private func itemContextMenu(_ item: Item) -> some View {
+        let targets = contextTargets(for: item)
+
+        if targets.count > 1 {
+            // Several books in hand: only what applies to all of them. Opening
+            // one, renaming one, editing one cover are about a single book, and
+            // leaving them here would only raise the question of which.
+            Text("\(targets.count.formatted())件を選択中")
+            Divider()
+            Button("削除") { deleteItems(targets, trashFiles: false) }
+            Button("ゴミ箱に入れる...") { deleteItems(targets, trashFiles: true) }
+            Divider()
+            ratingMenu(for: targets)
+            bookTypeMenu(for: targets)
+            Button("未読チェック") { toggleUnread(for: targets) }
+        } else {
+            singleItemContextMenu(item, targets: targets)
+        }
+    }
+
+    @ViewBuilder
+    private func ratingMenu(for targets: [Item]) -> some View {
+        Menu("レート") {
+            Button("なし") { setRating(0, for: targets) }
+            ForEach(1...5, id: \.self) { rating in
+                Button(String(repeating: "★", count: rating)) { setRating(rating, for: targets) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bookTypeMenu(for targets: [Item]) -> some View {
+        Menu("種類") {
+            ForEach(0..<BookTypeInfo.count, id: \.self) { index in
+                Button(typeNames[index]) { setBookType(index, for: targets) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func singleItemContextMenu(_ item: Item, targets: [Item]) -> some View {
         Button("スライドショー") { startSlideshow(item) }
         Button("このヘルパーで開く") { openItem(item) }
 
         Divider()
 
-        Button("削除") { deleteItem(item, trashFile: false) }
-        Button("ゴミ箱に入れる...") { deleteItem(item, trashFile: true) }
+        Button("削除") { deleteItems(targets, trashFiles: false) }
+        Button("ゴミ箱に入れる...") { deleteItems(targets, trashFiles: true) }
 
-        Menu("レート") {
-            Button("なし") { item.rating = 0; try? modelContext.save() }
-            ForEach(1...5, id: \.self) { r in
-                Button(String(repeating: "★", count: r)) { item.rating = r; try? modelContext.save() }
-            }
-        }
-
-        Menu("種類") {
-            ForEach(0..<BookTypeInfo.count, id: \.self) { idx in
-                Button(typeNames[idx]) { item.bookType = idx; try? modelContext.save() }
-            }
-        }
-
-        Button("未読チェック") { item.isUnread.toggle(); try? modelContext.save() }
+        ratingMenu(for: targets)
+        bookTypeMenu(for: targets)
+        Button("未読チェック") { toggleUnread(for: targets) }
 
         Divider()
 

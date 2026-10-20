@@ -48,3 +48,27 @@ enum LibraryTableScrollTarget {
         return rows.firstIndex { $0.id == itemID }
     }
 }
+
+/// What a right-click acts on.
+///
+/// Clicking inside a selection means the selection; clicking outside it means
+/// the one row clicked. It is how every list on the system behaves, and getting
+/// it wrong means a menu raised over twenty selected books quietly acting on
+/// one of them.
+enum LibraryContextTarget {
+    static func ids(clicked id: UUID, selection: Set<UUID>) -> [UUID] {
+        guard selection.count > 1, selection.contains(id) else { return [id] }
+        return Array(selection)
+    }
+}
+
+/// Which way "未読チェック" moves a selection.
+///
+/// Toggling each book separately would leave a mixed selection mixed, only the
+/// other way round, which is not what the menu means. The majority decides, and
+/// ties mark unread — the state someone is usually reaching for.
+enum LibraryUnreadToggle {
+    static func marksUnread(unreadCount: Int, total: Int) -> Bool {
+        unreadCount * 2 <= total
+    }
+}

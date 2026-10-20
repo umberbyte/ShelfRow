@@ -4,11 +4,14 @@ import SwiftUI
 enum LibraryTableAction {
     case startSlideshow(UUID)
     case open(UUID)
-    case delete(UUID)
-    case trash(UUID)
-    case setRating(UUID, Int)
-    case setBookType(UUID, Int)
-    case toggleUnread(UUID)
+    // These carry everything they act on. A menu raised on one of several
+    // selected books acts on all of them, which is what every list on the
+    // system does and what the row under the cursor alone would not.
+    case delete([UUID])
+    case trash([UUID])
+    case setRating([UUID], Int)
+    case setBookType([UUID], Int)
+    case toggleUnread([UUID])
     case revealInFinder(UUID)
     case moveFile(UUID)
     case renameFile(UUID)
@@ -175,7 +178,10 @@ struct LibraryTableView: NSViewRepresentable {
                 view.rating = item.rating
                 view.isRowSelected = selected
                 view.onChange = { [weak self] id, rating in
-                    self?.parent.onAction(.setRating(id, rating))
+                    // Clicking the stars in a row is about that row, whatever
+                    // else is selected. The menu is where a selection is acted
+                    // on as one.
+                    self?.parent.onAction(.setRating([id], rating))
                 }
                 return view
             default:
@@ -257,34 +263,33 @@ struct LibraryTableView: NSViewRepresentable {
         func contextMenu(for row: Int) -> NSMenu? {
             guard displayedRows.indices.contains(row) else { return nil }
             let item = displayedRows[row]
+            let targets = contextTargets(clicked: row)
             let menu = NSMenu()
+
+            // With several books in hand, the menu is only what applies to all
+            // of them. Opening one, renaming one, editing one cover: those are
+            // about a single book, and leaving them on a menu raised over
+            // twenty would only invite the question of which one.
+            if targets.count > 1 {
+                menu.addItem(NSMenuItem(title: "\(targets.count.formatted())件を選択中", action: nil, keyEquivalent: ""))
+                menu.addItem(.separator())
+                menu.addItem(commandItem("削除", .delete(targets)))
+                menu.addItem(commandItem("ゴミ箱に入れる...", .trash(targets)))
+                menu.addItem(.separator())
+                menu.addItem(ratingSubmenu(for: targets))
+                menu.addItem(typeSubmenu(for: targets))
+                menu.addItem(commandItem("未読チェック", .toggleUnread(targets)))
+                return menu
+            }
+
             menu.addItem(commandItem("スライドショー", .startSlideshow(item.id)))
             menu.addItem(commandItem("このヘルパーで開く", .open(item.id)))
             menu.addItem(.separator())
-            menu.addItem(commandItem("削除", .delete(item.id)))
-            menu.addItem(commandItem("ゴミ箱に入れる...", .trash(item.id)))
-
-            let ratingItem = NSMenuItem(title: "レート", action: nil, keyEquivalent: "")
-            let ratingMenu = NSMenu()
-            ratingMenu.addItem(commandItem("なし", .setRating(item.id, 0)))
-            for rating in 1...5 {
-                ratingMenu.addItem(commandItem(
-                    String(repeating: "★", count: rating),
-                    .setRating(item.id, rating)
-                ))
-            }
-            ratingItem.submenu = ratingMenu
-            menu.addItem(ratingItem)
-
-            let typeItem = NSMenuItem(title: "種類", action: nil, keyEquivalent: "")
-            let typeMenu = NSMenu()
-            for index in 0..<BookTypeInfo.count {
-                let title = parent.typeNames.indices.contains(index) ? parent.typeNames[index] : "種類 \(index + 1)"
-                typeMenu.addItem(commandItem(title, .setBookType(item.id, index)))
-            }
-            typeItem.submenu = typeMenu
-            menu.addItem(typeItem)
-            menu.addItem(commandItem("未読チェック", .toggleUnread(item.id)))
+            menu.addItem(commandItem("削除", .delete(targets)))
+            menu.addItem(commandItem("ゴミ箱に入れる...", .trash(targets)))
+            menu.addItem(ratingSubmenu(for: targets))
+            menu.addItem(typeSubmenu(for: targets))
+            menu.addItem(commandItem("未読チェック", .toggleUnread(targets)))
             menu.addItem(.separator())
             menu.addItem(commandItem("Finderで表示", .revealInFinder(item.id)))
             menu.addItem(commandItem("ファイルを移動...", .moveFile(item.id)))
@@ -297,6 +302,39 @@ struct LibraryTableView: NSViewRepresentable {
             menu.addItem(.separator())
             menu.addItem(sortItem)
             return menu
+        }
+
+        /// The books the menu acts on: the selection when the click landed
+        /// inside it, and otherwise the one book clicked.
+        private func contextTargets(clicked row: Int) -> [UUID] {
+            let selection = Set((tableView?.selectedRowIndexes ?? IndexSet()).compactMap { index in
+                displayedRows.indices.contains(index) ? displayedRows[index].id : nil
+            })
+            let targets = Set(LibraryContextTarget.ids(clicked: displayedRows[row].id, selection: selection))
+            // In the order they are shown, so a menu's count and the list agree.
+            return displayedRows.map(\.id).filter { targets.contains($0) }
+        }
+
+        private func ratingSubmenu(for targets: [UUID]) -> NSMenuItem {
+            let item = NSMenuItem(title: "レート", action: nil, keyEquivalent: "")
+            let menu = NSMenu()
+            menu.addItem(commandItem("なし", .setRating(targets, 0)))
+            for rating in 1...5 {
+                menu.addItem(commandItem(String(repeating: "★", count: rating), .setRating(targets, rating)))
+            }
+            item.submenu = menu
+            return item
+        }
+
+        private func typeSubmenu(for targets: [UUID]) -> NSMenuItem {
+            let item = NSMenuItem(title: "種類", action: nil, keyEquivalent: "")
+            let menu = NSMenu()
+            for index in 0..<BookTypeInfo.count {
+                let title = parent.typeNames.indices.contains(index) ? parent.typeNames[index] : "種類 \(index + 1)"
+                menu.addItem(commandItem(title, .setBookType(targets, index)))
+            }
+            item.submenu = menu
+            return item
         }
 
         func fitFlexibleColumn(to availableWidth: CGFloat) {

@@ -190,3 +190,33 @@ struct PendingDeletionTests {
         #expect(deletion.explanation.contains("ライブラリには残ります"))
     }
 }
+
+/// What a right-click acts on, and which way a mixed selection is marked.
+struct LibraryContextTargetTests {
+    @Test func clickingInsideASelectionActsOnAllOfIt() {
+        let a = UUID(), b = UUID(), c = UUID()
+        let targets = Set(LibraryContextTarget.ids(clicked: b, selection: [a, b, c]))
+
+        #expect(targets == [a, b, c])
+    }
+
+    @Test func clickingOutsideASelectionActsOnWhatWasClicked() {
+        let a = UUID(), b = UUID(), outsider = UUID()
+        #expect(LibraryContextTarget.ids(clicked: outsider, selection: [a, b]) == [outsider])
+    }
+
+    @Test func oneBookSelectedIsJustThatBook() {
+        let a = UUID()
+        #expect(LibraryContextTarget.ids(clicked: a, selection: [a]) == [a])
+        #expect(LibraryContextTarget.ids(clicked: a, selection: []) == [a])
+    }
+
+    @Test func unreadFollowsTheMajorityRatherThanTogglingEachBook() {
+        // Toggling one by one would leave a mixed selection mixed the other way
+        // round, which is not what the menu means.
+        #expect(LibraryUnreadToggle.marksUnread(unreadCount: 1, total: 5))
+        #expect(!LibraryUnreadToggle.marksUnread(unreadCount: 4, total: 5))
+        // A tie marks unread: that is the state someone is reaching for.
+        #expect(LibraryUnreadToggle.marksUnread(unreadCount: 2, total: 4))
+    }
+}
