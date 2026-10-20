@@ -168,3 +168,25 @@ struct LibraryFoldDecisionTests {
         ))
     }
 }
+
+/// What a press of delete is about to do.
+struct PendingDeletionTests {
+    @Test func deletingFromTheLibrarySaysSoAndThatFilesRemain() {
+        let deletion = ContentView.PendingDeletion(itemIDs: [UUID(), UUID()], shelfID: nil)
+
+        #expect(deletion.prompt.contains("2件"))
+        #expect(deletion.prompt.contains("ライブラリ"))
+        #expect(deletion.confirmTitle == "削除")
+        // The distinction a person needs before pressing it: the books go, the
+        // files do not.
+        #expect(deletion.explanation.contains("ファイル自体は残ります"))
+    }
+
+    @Test func takingBooksOffAShelfIsNotDeletingThem() {
+        let deletion = ContentView.PendingDeletion(itemIDs: [UUID()], shelfID: UUID())
+
+        #expect(deletion.prompt.contains("シェルフから外しますか"))
+        #expect(deletion.confirmTitle == "外す")
+        #expect(deletion.explanation.contains("ライブラリには残ります"))
+    }
+}

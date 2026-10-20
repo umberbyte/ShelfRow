@@ -405,6 +405,10 @@ struct LibraryTableView: NSViewRepresentable {
             tableView.backgroundColor = .clear
             tableView.gridColor = .separatorColor
             tableView.usesAlternatingRowBackgroundColors = true
+            // Shift for a range, command for one at a time, and a drag across
+            // rows — the selection every list on the system has, which AppKit
+            // gives for this one line.
+            tableView.allowsMultipleSelection = true
             tableView.setAccessibilityIdentifier("libraryTable")
             tableView.setAccessibilityLabel("ライブラリ")
         }

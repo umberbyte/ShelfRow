@@ -320,6 +320,11 @@ struct ContentView: View {
     /// which ones they are is what makes a drop cost a few rows rather than a
     /// re-read of the library.
     @State private var pendingInsertedItemIDs: Set<UUID> = []
+    /// Books this view has already taken off the screen, waiting for the save
+    /// that removes them to come back around. Without this the save would ask
+    /// for the library to be read again to learn what the view already did.
+    @State private var selfRemovedItemCount = 0
+    @State private var pendingDeletion: PendingDeletion?
     /// Shelf membership changed. A few dozen shelves, read on their own.
     @State private var pendingShelfReload = false
     /// The search the list currently shows the results of, so a change that is
@@ -594,6 +599,23 @@ struct ContentView: View {
                     Text(thumbnailDistributionOfferMessage)
                 }
         )
+        .confirmationDialog(
+            pendingDeletion?.prompt ?? "",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDeletion
+        ) { deletion in
+            Button(deletion.confirmTitle, role: .destructive) {
+                performPendingDeletion(deletion)
+                pendingDeletion = nil
+            }
+            Button("キャンセル", role: .cancel) { pendingDeletion = nil }
+        } message: { deletion in
+            Text(deletion.explanation)
+        }
         .overlay {
             if isImporting {
                 importProgressOverlay
@@ -2167,6 +2189,15 @@ struct ContentView: View {
             }
             requiresFullProjectionSnapshot = true
         } else if structuralChange {
+            if removedItems.count > 0, selfRemovedItemCount >= removedItems.count {
+                // This view deleted them and has already taken them off the
+                // screen. Reading the library again would only confirm what is
+                // already shown.
+                selfRemovedItemCount -= removedItems.count
+                pendingShelfReload = pendingShelfReload || shelvesTouched
+                scheduleLibraryRefresh()
+                return
+            }
             // Books that have gone cannot say which ones they were: reading any
             // property of a deleted model traps, including its identifier. The
             // library is read again, which is what deletion still costs.
@@ -2517,6 +2548,22 @@ struct ContentView: View {
     }
 
     private func selectItemFromPointer(_ item: Item, modifiers: NSEvent.ModifierFlags) {
+        // Shift takes everything between the last click and this one, the way
+        // Finder does. The anchor is where the run started, not where the
+        // cursor happens to be.
+        if modifiers.contains(.shift), let anchor = selectionAnchorItemID ?? selectedItemID {
+            let order = displayItems.map(\.id)
+            if let from = order.firstIndex(of: anchor), let to = order.firstIndex(of: item.id) {
+                let range = from <= to ? from...to : to...from
+                selectedItemIDs = Set(order[range])
+                selectedItemID = item.id
+                selectedDisplayIndex = to
+                lastKeyboardScrollIndex = to
+                prefetchNeighborCovers()
+                return
+            }
+        }
+
         let isCommandClick = modifiers.contains(.command)
         if isCommandClick {
             if selectedItemIDs.contains(item.id) {
@@ -3190,11 +3237,52 @@ struct ContentView: View {
         return displayItems.filter { selectedIDs.contains($0.id) }
     }
 
+    /// What a press of delete is about to do, held until it is confirmed.
+    ///
+    /// A keystroke carries no second thought of its own — the hand is already
+    /// moving — so the question is asked before anything goes. The menu and the
+    /// context menu are deliberate acts and keep their own behaviour.
+    struct PendingDeletion: Identifiable {
+        let id = UUID()
+        let itemIDs: [UUID]
+        /// The shelf to take them off, or nil to delete them from the library.
+        let shelfID: UUID?
+
+        var prompt: String {
+            let count = itemIDs.count.formatted()
+            return shelfID == nil
+                ? "\(count)件をライブラリから削除しますか？"
+                : "\(count)件をこのシェルフから外しますか？"
+        }
+
+        var explanation: String {
+            shelfID == nil
+                ? "書籍の情報がライブラリから削除されます。ファイル自体は残ります。"
+                : "シェルフから外れるだけで、ライブラリには残ります。"
+        }
+
+        var confirmTitle: String { shelfID == nil ? "削除" : "外す" }
+    }
+
     private func deleteSelectedItemsFromKeyboard() {
         let items = selectedItemsForAction()
         guard !items.isEmpty else { return }
 
         if case .shelf(let shelfID) = sidebarSelection,
+           shelves.contains(where: { $0.id == shelfID && $0.type == 0 }) {
+            pendingDeletion = PendingDeletion(itemIDs: items.map(\.id), shelfID: shelfID)
+        } else {
+            pendingDeletion = PendingDeletion(itemIDs: items.map(\.id), shelfID: nil)
+        }
+    }
+
+    /// Carries out what was asked for, against the books that are still there.
+    private func performPendingDeletion(_ deletion: PendingDeletion) {
+        let wanted = Set(deletion.itemIDs)
+        let items = displayItems.filter { wanted.contains($0.id) }
+        guard !items.isEmpty else { return }
+
+        if let shelfID = deletion.shelfID,
            let shelf = shelves.first(where: { $0.id == shelfID && $0.type == 0 }) {
             remove(items, from: shelf)
         } else {
@@ -3206,16 +3294,57 @@ struct ContentView: View {
         let ids = Set(items.map(\.id))
         shelf.items = (shelf.items ?? []).filter { !ids.contains($0.id) }
         clearSelection(afterRemoving: ids)
+        // Taken off this shelf, not out of the library: the rows go because the
+        // shelf is what is being looked at.
+        if case .shelf = sidebarSelection {
+            takeOutOfView(ids)
+        }
         try? modelContext.save()
     }
 
     private func deleteItemsFromLibrary(_ items: [Item]) {
         let ids = Set(items.map(\.id))
+        // The rows go first. Saving, and the sync that follows it, take as long
+        // as they take; a person who pressed delete should not have to wonder
+        // whether it happened.
+        clearSelection(afterRemoving: ids)
+        takeOutOfView(ids)
+
         for item in items {
             modelContext.delete(item)
         }
-        clearSelection(afterRemoving: ids)
+        selfRemovedItemCount += items.count
         try? modelContext.save()
+    }
+
+    /// Takes books out of what is on screen, without waiting for the store.
+    ///
+    /// Everything here is value snapshots and dictionaries this view owns, so it
+    /// is immediate. The store catches up on its own schedule, and the next rebuild
+    /// agrees with what is already shown.
+    private func takeOutOfView(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+
+        projectionItems.removeAll { ids.contains($0.id) }
+        displayListRows.removeAll { ids.contains($0.id) }
+        displayItems.removeAll { ids.contains($0.id) }
+        displayRows = displayItems.enumerated().map {
+            LibraryDisplayRow(id: $0.element.id, index: $0.offset, item: $0.element)
+        }
+        displayListGeneration &+= 1
+
+        var rebuiltIndices: [UUID: Int] = [:]
+        rebuiltIndices.reserveCapacity(projectionItems.count)
+        for (position, item) in projectionItems.enumerated() {
+            rebuiltIndices[item.id] = position
+        }
+        projectionIndices = rebuiltIndices
+
+        for id in ids {
+            projectionModels[id] = nil
+            registrationIndex.remove(id)
+        }
+        libraryItemCount = max(0, libraryItemCount - ids.count)
     }
 
     private func clearSelection(afterRemoving removedIDs: Set<UUID>) {
@@ -3263,7 +3392,9 @@ struct ContentView: View {
 
     private func deleteItemModel(_ item: Item) {
         clearSelection(afterRemoving: [item.id])
+        takeOutOfView([item.id])
         modelContext.delete(item)
+        selfRemovedItemCount += 1
         try? modelContext.save()
     }
 
