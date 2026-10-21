@@ -589,6 +589,12 @@ nonisolated enum DropPerformanceLog {
         logger.debug("\(name, privacy: .public): \(milliseconds(took), privacy: .public)ms")
     }
 
+    /// A step of the path between a save and the list showing it. Info level
+    /// for as long as that path is under investigation.
+    static func note(_ text: String) {
+        logger.info("\(text, privacy: .public)")
+    }
+
     private static func milliseconds(_ duration: Duration) -> Int {
         Int(duration.components.seconds * 1000 + duration.components.attoseconds / 1_000_000_000_000_000)
     }

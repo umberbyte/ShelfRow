@@ -312,6 +312,8 @@ struct ContentView: View {
     /// of notifications, and acting on each one separately is what starved the
     /// projection: every refresh cancelled the one before it.
     @State private var libraryRefreshTask: Task<Void, Never>?
+    /// One read of the library at a time; see `LibraryReadQueue`.
+    @State private var libraryReads = LibraryReadQueue()
     /// What registration asks "is this path already here?" against. Kept with
     /// the projection rather than built per drop: it is the whole library, and
     /// walking it is the kind of pause a person sees in the cursor.
@@ -395,7 +397,9 @@ struct ContentView: View {
         if let visible = displayItems.first(where: { $0.id == selectedID }) {
             return visible
         }
-        return allItems.first(where: { $0.id == selectedID })
+        // The projection's own models first: a book registered a moment ago is
+        // in there before the query has heard about the save.
+        return projectionModels[selectedID] ?? allItems.first(where: { $0.id == selectedID })
     }
 
     private var typeNames: [String] {
@@ -2271,6 +2275,10 @@ struct ContentView: View {
     /// taken when the timer fires, not when it was set.
     private func scheduleLibraryRefresh() {
         guard libraryRefreshTask == nil else { return }
+        guard !libraryReads.isReading else {
+            libraryReads.deferAnother()
+            return
+        }
         libraryRefreshTask = Task { @MainActor in
             try? await Task.sleep(for: Self.librarySettleInterval)
             libraryRefreshTask = nil
@@ -2285,8 +2293,14 @@ struct ContentView: View {
     /// and sort changes reuse the value snapshots and model lookup table, then run
     /// the projection off the UI actor.
     private func refreshDisplayItems(reason: LibraryRefreshReason = .request, settleFirst: Bool = false) {
+        if reason == .library, !libraryReads.beginOrDefer() { return }
         projectionTask?.cancel()
         projectionTask = Task { @MainActor in
+            defer {
+                if reason == .library, libraryReads.finish() {
+                    scheduleLibraryRefresh()
+                }
+            }
             do {
                 // Only typing needs settling, and only because each keystroke
                 // would otherwise project the whole library. Changing shelf is
@@ -2339,10 +2353,18 @@ struct ContentView: View {
                         if arrived.count == missing.count {
                             for item in arrived { models[item.id] = item }
                         } else {
-                            // Whatever the fetch could not answer — a predicate
-                            // this store will not take, say — is worth the walk.
+                            // Whatever the predicate could not answer is asked
+                            // for the long way — but from the context, never
+                            // from `allItems`. The query only learns of a save
+                            // when SwiftUI next gets a turn, and a drop needs
+                            // the books it just added now. Building the list
+                            // from the query here is what left a batch drop
+                            // invisible until the app was restarted: the rows
+                            // existed, and were filtered out for having no
+                            // model to go with them.
+                            let stored = (try? modelContext.fetch(FetchDescriptor<Item>())) ?? []
                             models.reserveCapacity(wanted.count)
-                            for (index, item) in allItems.enumerated() {
+                            for (index, item) in stored.enumerated() {
                                 try Task.checkCancellation()
                                 if models[item.id] == nil, wanted.contains(item.id) {
                                     models[item.id] = item
@@ -2757,14 +2779,21 @@ struct ContentView: View {
 
             dropQueueRemaining = facts.count
             var lastAddedID: UUID?
+            var registered: [Item] = []
             var pageCounts: [DroppedFilePageCountRequest] = []
             // The index is the projection's, already built. Only a drop that
             // beats the first projection has to pay for one.
-            if registrationIndex.models.isEmpty, !allItems.isEmpty {
-                registrationIndex.replace(
-                    models: Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
-                    snapshots: []
-                )
+            if registrationIndex.models.isEmpty {
+                // From the context rather than the query, for the same reason:
+                // a drop arriving before the first projection must still be
+                // checked against books that are already there.
+                let stored = (try? modelContext.fetch(FetchDescriptor<Item>())) ?? []
+                if !stored.isEmpty {
+                    registrationIndex.replace(
+                        models: Dictionary(stored.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }),
+                        snapshots: []
+                    )
+                }
             }
             var volumesByPath = Dictionary(
                 ((try? modelContext.fetch(FetchDescriptor<Volume>())) ?? []).map { ($0.lastKnownPath, $0) },
@@ -2790,6 +2819,7 @@ struct ContentView: View {
                     volumesByPath: &volumesByPath
                 )
                 if outcome.isNew { lastAddedID = outcome.itemID }
+                if let item = registrationIndex.models[outcome.itemID] { registered.append(item) }
                 if let request = outcome.pageCount { pageCounts.append(request) }
 
                 // The counter is a reassurance, not a readout, and every change
@@ -2806,8 +2836,27 @@ struct ContentView: View {
 
             BookmarkVault.shared.savePendingChanges()
             elapsed("bookmarks")
-            try? modelContext.save()
+            do {
+                try modelContext.save()
+            } catch {
+                DropPerformanceLog.note("save FAILED: \(error)")
+            }
             elapsed("save")
+
+            // Folded here, from the books in hand. The save notification cannot
+            // be relied on for this: it arrives from a context that is not this
+            // one and carries no identifiers, so nothing downstream ever learns
+            // which books were added. Waiting for the library to be read back
+            // instead is what left a drop invisible — under a running sync that
+            // read never finishes.
+            if !registered.isEmpty {
+                for item in registered {
+                    pendingInsertedItemIDs.insert(item.id)
+                    projectionModels[item.id] = item
+                }
+                libraryGeneration &+= 1
+                scheduleLibraryRefresh()
+            }
             if let lastAddedID {
                 selection.selectRegisteredItem(lastAddedID)
             }

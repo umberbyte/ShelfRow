@@ -72,3 +72,39 @@ enum LibraryUnreadToggle {
         unreadCount * 2 <= total
     }
 }
+
+/// Keeps one read of the library in flight at a time.
+///
+/// Reading a library of twenty thousand books takes seconds, and a running
+/// iCloud import asks for a fresh one every second or two. Starting the newer
+/// request in place of the running one — the obvious reading of "the data
+/// changed again" — means no read ever finishes, and anything waiting on one
+/// never appears. The later request waits instead, and is run once when the
+/// current read is done, by which time it covers everything that arrived.
+struct LibraryReadQueue {
+    private(set) var isReading = false
+    private(set) var wantsAnother = false
+
+    /// Answers whether to start now. A no means it has been remembered.
+    mutating func beginOrDefer() -> Bool {
+        guard !isReading else {
+            deferAnother()
+            return false
+        }
+        isReading = true
+        return true
+    }
+
+    /// Remembers that the library should be read again.
+    mutating func deferAnother() {
+        wantsAnother = true
+    }
+
+    /// Answers whether another read was asked for while this one ran.
+    mutating func finish() -> Bool {
+        isReading = false
+        guard wantsAnother else { return false }
+        wantsAnother = false
+        return true
+    }
+}

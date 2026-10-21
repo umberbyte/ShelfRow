@@ -220,3 +220,55 @@ struct LibraryContextTargetTests {
         #expect(LibraryUnreadToggle.marksUnread(unreadCount: 2, total: 4))
     }
 }
+
+/// One read of the library at a time.
+struct LibraryReadQueueTests {
+    @Test func theFirstReadStarts() {
+        var queue = LibraryReadQueue()
+        // Bound first: #expect cannot call a mutating member on its operand.
+        let started = queue.beginOrDefer()
+
+        #expect(started)
+        #expect(queue.isReading)
+    }
+
+    @Test func aSecondRequestWaitsRatherThanReplacingTheFirst() {
+        // The bug this pins: under a running sync a request arrives every second
+        // or two, a read takes about four, and starting the new one in place of
+        // the old meant none ever finished — books added by a drop stayed
+        // invisible until the app was restarted.
+        var queue = LibraryReadQueue()
+        let first = queue.beginOrDefer()
+        let second = queue.beginOrDefer()
+        let third = queue.beginOrDefer()
+
+        #expect(first)
+        #expect(!second)
+        #expect(!third)
+        #expect(queue.isReading)
+        #expect(queue.wantsAnother)
+    }
+
+    @Test func whatWaitedIsRunOnceWhenTheReadIsDone() {
+        var queue = LibraryReadQueue()
+        _ = queue.beginOrDefer()
+        _ = queue.beginOrDefer()
+        _ = queue.beginOrDefer()
+
+        // Three requests while reading, one read afterwards: by then it covers
+        // everything that arrived.
+        let another = queue.finish()
+
+        #expect(another)
+        #expect(!queue.isReading)
+        #expect(!queue.wantsAnother)
+    }
+
+    @Test func aQuietReadAsksForNothingFurther() {
+        var queue = LibraryReadQueue()
+        _ = queue.beginOrDefer()
+        let another = queue.finish()
+
+        #expect(!another)
+    }
+}
