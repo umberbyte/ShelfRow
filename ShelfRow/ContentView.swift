@@ -1778,8 +1778,13 @@ struct ContentView: View {
         ].joined(separator: "|")
     }
 
-    private func computeFilteredItems() -> [Item] {
-        var items = allItems
+    /// `allItems` (the `@Query`) only catches up with an insert once SwiftUI gets a
+    /// render turn to observe the context's save notification. Code that inserts
+    /// and immediately needs the result in the same async flow — the batch drop
+    /// below — cannot assume that turn has happened yet, so it fetches fresh and
+    /// passes the result in here instead of trusting `allItems` to already include it.
+    private func computeFilteredItems(source: [Item]? = nil) -> [Item] {
+        var items = source ?? allItems
 
         // 1. Sidebar Selection
         if let selection = sidebarSelection {
@@ -2177,7 +2182,12 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
                 selectedItemIDs = [lastAddedID]
                 selectionAnchorItemID = lastAddedID
             }
-            displayItems = computeFilteredItems()
+            // `allItems` may not have observed this save yet — this task never gave
+            // SwiftUI a render turn between the last insert and here — so the
+            // refresh is built from an explicit fetch rather than risking a
+            // filtered list that silently drops everything just added.
+            let freshItems = (try? modelContext.fetch(FetchDescriptor<Item>())) ?? allItems
+            displayItems = computeFilteredItems(source: freshItems)
             refreshSelectedDisplayIndex()
         }
     }
@@ -2298,14 +2308,22 @@ private struct PrimaryClickOverlay: NSViewRepresentable {
     }
 
     private func applyPageCountUpdate(_ update: DroppedFilePageCountUpdate) {
-        guard let item = allItems.first(where: { $0.id == update.itemID }) else { return }
+        // Looked up by a direct fetch, not `allItems.first(where:)`: this runs
+        // moments after the item was inserted in the same drop, often before
+        // `allItems` has observed that insert, so searching it here could silently
+        // skip the update.
+        let itemID = update.itemID
+        guard let item = try? modelContext.fetch(
+            FetchDescriptor<Item>(predicate: #Predicate { $0.id == itemID })
+        ).first else { return }
         item.pages = update.pageCount
         if update.shouldApplyAutoBookType,
            let autoBookType = BookTypeAutoClassifier.classify(pageCount: update.pageCount) {
             item.bookType = autoBookType
         }
         try? modelContext.save()
-        displayItems = computeFilteredItems()
+        let freshItems = (try? modelContext.fetch(FetchDescriptor<Item>())) ?? allItems
+        displayItems = computeFilteredItems(source: freshItems)
         refreshSelectedDisplayIndex()
     }
 
