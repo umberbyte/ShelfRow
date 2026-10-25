@@ -272,3 +272,38 @@ struct LibraryReadQueueTests {
         #expect(!another)
     }
 }
+
+/// Shelf membership, as the list filters by it.
+struct LibraryShelfSnapshotTests {
+    @Test func booksDroppedOnAShelfAreOnItAtOnce() {
+        // The membership the list filters by is a copy taken when the library
+        // was last read. Left unamended, a drop onto a shelf arrived in the
+        // library and not on the shelf it was dropped on.
+        let shelf = LibraryShelfSnapshot(id: UUID(), conditions: nil, itemIDs: [])
+        let first = UUID()
+        let second = UUID()
+
+        #expect(shelf.adding([first, second]).itemIDs == [first, second])
+        #expect(shelf.adding([first]).adding([first]).itemIDs == [first])
+    }
+
+    @Test func booksTakenOffAShelfLeaveIt() {
+        let kept = UUID()
+        let removed = UUID()
+        let shelf = LibraryShelfSnapshot(id: UUID(), conditions: nil, itemIDs: [kept, removed])
+
+        #expect(shelf.removing([removed]).itemIDs == [kept])
+    }
+
+    @Test func aSmartShelfKeepsNoMembershipOfItsOwn() {
+        // It answers by condition; nothing is put on one or taken off by hand.
+        let smart = LibraryShelfSnapshot(
+            id: UUID(),
+            conditions: SmartConditions(),
+            itemIDs: []
+        )
+
+        #expect(smart.adding([UUID()]) == smart)
+        #expect(smart.removing([UUID()]) == smart)
+    }
+}

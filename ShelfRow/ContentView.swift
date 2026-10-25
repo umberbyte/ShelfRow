@@ -2854,6 +2854,12 @@ struct ContentView: View {
                     pendingInsertedItemIDs.insert(item.id)
                     projectionModels[item.id] = item
                 }
+                // Which shelf holds what is a second thing the list is built
+                // from, and dropping onto a shelf changes it. Left to be read
+                // back, the books arrived in the library and not on the shelf
+                // they were dropped on — which is where they were being looked
+                // for.
+                addToShelfSnapshot(registered.map(\.id), shelfID: targetShelfID)
                 libraryGeneration &+= 1
                 scheduleLibraryRefresh()
             }
@@ -3469,6 +3475,7 @@ struct ContentView: View {
     private func remove(_ items: [Item], from shelf: Shelf) {
         let ids = Set(items.map(\.id))
         shelf.items = (shelf.items ?? []).filter { !ids.contains($0.id) }
+        removeFromShelfSnapshot(ids, shelfID: shelf.id)
         clearSelection(afterRemoving: ids)
         // Taken off this shelf, not out of the library: the rows go because the
         // shelf is what is being looked at.
@@ -3491,6 +3498,30 @@ struct ContentView: View {
         }
         selfRemovedItemCount += items.count
         try? modelContext.save()
+    }
+
+    /// Records on the shelf's own snapshot that these books are now on it.
+    ///
+    /// The shelf membership the list filters by is a value copy, taken when the
+    /// library was last read. Adding to the shelf in the store does not change
+    /// that copy, and reading it back takes a round trip the person is waiting
+    /// through — so it is amended here, where what changed is known.
+    private func addToShelfSnapshot(_ itemIDs: [UUID], shelfID: UUID?) {
+        amendShelfSnapshot(shelfID) { $0.adding(itemIDs) }
+    }
+
+    /// Records that these books have left the shelf, for the same reason.
+    private func removeFromShelfSnapshot(_ itemIDs: Set<UUID>, shelfID: UUID?) {
+        amendShelfSnapshot(shelfID) { $0.removing(itemIDs) }
+    }
+
+    private func amendShelfSnapshot(
+        _ shelfID: UUID?,
+        _ amend: (LibraryShelfSnapshot) -> LibraryShelfSnapshot
+    ) {
+        guard let shelfID,
+              let position = projectionShelves.firstIndex(where: { $0.id == shelfID }) else { return }
+        projectionShelves[position] = amend(projectionShelves[position])
     }
 
     /// Takes books out of what is on screen, without waiting for the store.

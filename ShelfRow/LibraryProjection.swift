@@ -190,6 +190,26 @@ struct LibraryShelfSnapshot: Sendable, Equatable {
     let id: UUID
     let conditions: SmartConditions?
     let itemIDs: Set<UUID>
+
+    /// The same shelf with these books on it.
+    ///
+    /// Membership is a value copy taken when the library was last read, so
+    /// putting a book on a shelf in the store does not change what the list
+    /// filters by. Amending the copy is how a drop onto a shelf shows up on
+    /// that shelf without waiting for the library to be read again.
+    ///
+    /// A smart shelf is a question rather than a list, so it is returned
+    /// unchanged — nothing is put on one by hand.
+    func adding(_ ids: some Sequence<UUID>) -> LibraryShelfSnapshot {
+        guard conditions == nil else { return self }
+        return LibraryShelfSnapshot(id: id, conditions: conditions, itemIDs: itemIDs.union(ids))
+    }
+
+    /// The same shelf without them.
+    func removing(_ ids: some Sequence<UUID>) -> LibraryShelfSnapshot {
+        guard conditions == nil else { return self }
+        return LibraryShelfSnapshot(id: id, conditions: conditions, itemIDs: itemIDs.subtracting(ids))
+    }
 }
 
 struct LibrarySnapshotPayload: Sendable, Equatable {
